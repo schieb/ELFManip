@@ -10,7 +10,7 @@ from __builtin__ import bytearray
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
 
-output_base_path = "Z:\\delinker-test\\output"
+#output_base_path = "Z:\\delinker-test\\output"
 LOG_LEVEL = 4
 
 # order of section headers as they should appear in table of section headers
@@ -213,8 +213,12 @@ class ELF:
 				index += 1
 			if index == len(self.symbol_table):
 				# all symbols have STB_LOCAL binding (likely an error)
-				self.logger.error("Cannot determine info field for symtab sh entry")
-				exit()
+				''' this was here before sound delinker when it was assumed to be nearly impossible for an object file to reference no symbols
+					but this is exactly what data.o does
+				'''
+				#self.logger.warn("Cannot determine info field for symtab sh entry")
+				pass
+				
 			return index
 		
 		self.logger.debug("Building section headers")
@@ -417,7 +421,11 @@ class ELF:
 			st_shndx = 1
 			self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
 		else:
+			pass
+			''' deprecated -- data.o references NO symbols
 			self.logger.debug("\tAdding function symbols:")
+			print "function_dict:"
+			print function_dict
 			for func_name in function_dict:
 				#TODO: space overhead can be huge if large number of functions - should add symbol only if/when it is referenced (e.g., by a relocation entry)
 				symbol_name = func_name
@@ -428,8 +436,9 @@ class ELF:
 				st_other = STO_DEFAULT
 				st_shndx = STN_UNDEF
 				self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
+			'''
 			
-		
+	""" deprecated -- Sound delinker does not determine pointers	
 	def AddDataSymbol(self, symbol_name, head, st_value, st_size, seg_name, sym_type = STT_OBJECT):
 		'''	Adds a symbol to the symbol table for an object in a data section 
 			
@@ -471,9 +480,10 @@ class ELF:
 		
 		#TODO: only returns correct value if the 'else' condition above is executed
 		return self.symtab_dict[symbol_name]
-		
+	"""
 	
 	def AddTextSymbol(self, name, head, value, seg_name, sym_type = STT_OBJECT):
+		# Sound delinker - these will only be symbols used in a call
 		''' Adds a symbol to the symbol table for an object in the text section (i.e., call swap or mov ds:fptr, swap)
 			
 			@param name: name of symbol
@@ -710,7 +720,8 @@ class ELF:
 			self.logger.debug("Concat *UNDEFINED* section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
 		else:
 			self.logger.debug("Concat section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
-	
+			
+		print "new_section_hex: %s" % new_section_hex
 		return current_sections_hex + "00"*padding + new_section_hex
 	
 	def BuildFuncObject(self, text, function_name, stats, segment_ranges, functions):
@@ -874,7 +885,8 @@ class ELF:
 			else:
 				self.logger.debug("\t%s size 0x%x bytes" % (data_section_name, len(data_sections[data_section_name])))
 				
-				self.sections_hex[data_section_name] = self.PatchDataSection(data_sections[data_section_name], data_section_name, all_data_relocs[data_section_name])
+				#self.sections_hex[data_section_name] = self.PatchDataSection(data_sections[data_section_name], data_section_name, all_data_relocs[data_section_name])
+				self.sections_hex[data_section_name] = data_sections[data_section_name]
 				self.shdr_dict[data_section_name]['size'] = len(self.sections_hex[data_section_name]) / 2
 		
 	
@@ -895,12 +907,27 @@ class ELF:
 		
 		self.shdr_dict['.text']['size'] = 0 # maybe not needed
 		
-		self.AddAllDataSymbols(data_symbols, segment_ranges)
+		#self.AddAllDataSymbols(data_symbols, segment_ranges)
 		
 		self.BuildData(data_segs, verified_pointers)
 		
 		self.BuildELF('data')
+		
+	def BuildTextCopy(self, text_section, bb_heads, etc):
+		# Use facilities that are already in ELFManip
+		'''
+			for each bb_head:
+				patch over first byte with 0xF4
+				patch over the next 4 bytes with 0x00000000
+				create relocation entry for external symbol
+					- will be lots of these... but final executable will be much smaller than .o's
+					- defined in the set of function objects that we are delinking
+					- *only create symbols for BBs in functions we are delinking (o/w they wont end up being defined)
+				
+		'''
+		pass
 	
+	""" deprecated -- Sound delinker copies all data sections to the same base address
 	def AddAllDataSymbols(self, data_symbols, segment_ranges):
 		''' Creates a symbol table entry (AddDataSymbol) for *every* name in the the following data sections:
 				.data, .rodata, .bss
@@ -923,15 +950,15 @@ class ELF:
 				symbol_name, symbol_seg_offset, symbol_size, symbol_type, symbol_section = data_symbols[seg_name][ea]
 				self.AddDataSymbol(symbol_name, 0xffffffff, symbol_seg_offset, symbol_size, symbol_section, symbol_type)
 		
-		"""
+		'''
 		for ea in data_symbols[seg_name]:
 			for (symbol_name, symbol_seg_offset, symbol_size, symbol_type, symbol_section) in data_symbols[seg_name][ea]:
 				self.AddDataSymbol(symbol_name, 0xffffffff, symbol_seg_offset, symbol_size, symbol_section, symbol_type)
 			
 			pass
-		"""
+		'''
 		
-		"""
+		'''
 		print seg_name, [(name, hex(head), size, inferred_size) for (name, head, size, inferred_size) in data_symbols[seg_name]]
 		for (name, head, size, inferred_size) in data_symbols[seg_name]:
 			# calculate value
@@ -943,8 +970,10 @@ class ELF:
 				
 			value = head - seg_start # symbol location as an offset from its segment start
 			self.AddDataSymbol(name, head, value, inferred_size, seg_name)
-		"""
-	
+		'''
+	"""
+
+	""" deprecated -- Sound delinker copies all data sections to the same base address
 	def PatchDataSection(self, section_contents, section_name, relocs):
 		''' Patch data_section and create relocations and symbols
 			
@@ -994,14 +1023,14 @@ class ELF:
 				if pointee_section_name == '.text':
 					# undefined symbol (points to a function+offset)
 					#print hex(addr_to_patch), pointer_symbol_name, pointer_symbol_offset, pointer_segment_offset, pointee_symbol_name, pointee_symbol_offset, pointee_segment_name
-					"""
+					'''
 						name = str_table[pointee_symbol_name] - determined in AddToSymbolTable
 						value = 0 (undefined symbol - defined in a function object)
 						size = 0 (undefined symbol - defined in a function object)
 						info (type, binding) = (no type - even though we know it is a function, global)
 						other = 0 (no meaning, currently 0)
 						shndx = 0 (undefined symbol - no associated section header)
-					"""
+					'''
 					symbol_name = pointee_symbol_name
 					value = 0
 					size = 0
@@ -1038,6 +1067,7 @@ class ELF:
 		
 
 		return str(data_bytes).encode('hex')
+	"""
 
 	def BuildELF(self, function_name):
 		''' Responsible for creating the final ELF object file
@@ -1188,16 +1218,16 @@ class ELF:
 		
 		try:
 			#TODO: use python path manip funcitons to construct path
-			path = "%s\\%s" % (output_base_path, self.bin_filename)#, self.obj_filename)
+			path = "delinked/%s" % (self.bin_filename)#, self.obj_filename)
 			os.makedirs(path)
 		except OSError:
 			if not os.path.isdir(path):
 				self.logger.error("Could not create directory %s" % path)
 				return
 		if is_data_object:
-			obj_file = "%s\\data.o" % path
+			obj_file = "%s/data.o" % path
 		else:
-			obj_file = "%s\\%s.o" % (path, function_name)
+			obj_file = "%s/%s.o" % (path, function_name)
 
 		with open (obj_file, "wb") as f:
 			self.logger.info("Wrote %s" % obj_file)
