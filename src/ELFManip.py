@@ -3,6 +3,15 @@ from Constants import *
 import struct
 import binascii
 import os
+
+import logging
+logger = logging.getLogger("ELFManip")
+logger.setLevel(logging.DEBUG)
+sh = logging.StreamHandler()
+sh.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+logger.addHandler(sh)
+logger.propagate = False # turn off propagation to root handler prevents duplicate log entries
+
 #import idc, idautils
 from __builtin__ import bytearray
 #from idc import SEGATTR_ALIGN
@@ -254,7 +263,7 @@ class ELF:
 		'''
 		
 		fields = struct.unpack('IIIBBH', symbol.decode('hex'))
-		st_bind, st_type = self.ParseInfoByte(fields[3])
+		st_bind, _ = self.ParseInfoByte(fields[3])
 		return st_bind
 	
 	def GetSTInfo(self, st_bind, st_type):
@@ -275,9 +284,8 @@ class ELF:
 		'''
 		return (st_info >> 4, st_info & 0xf)
 	
-	def AddRelocEntry(self, function_offset, reloc_offset, rel_type, rel_section, symbol_name, symbol_index_test):
+	def AddRelocEntry(self, reloc_offset, rel_type, rel_section, symbol_name, symbol_index_test):
 		'''
-			@param function_offset: starting address of the current function
 			@param reloc_offset: integer address of the operand that needs relocation
 			@param rel_type: type of reference (1=absolute [R_386_32], 2=indirect [R_386_PC32])
 			@param rel_section: string section name that the reloc applies to
@@ -286,30 +294,34 @@ class ELF:
 			
 			@todo: remove symbol_index_test
 		'''
-		assert rel_type in [1,2]
-		self.logger.info("Adding relocation for symbol %s at offset 0x%08x in section %s" % (symbol_name, reloc_offset, rel_section))
+		assert rel_type in [R_386_32, R_386_PC32]
+		logger.info("Adding relocation for symbol %s at offset 0x%08x in section %s" % (symbol_name, reloc_offset, rel_section))
 		
 		
-		offset = reloc_offset - function_offset # offset to patch
-	
 		if symbol_name not in self.strtab_dict:
 			self.logger.error("%s not found in string table" % symbol_name)
 			exit("fix error")
-			
+		
+		#TODO: abstract the following to a class fucntion
 		# Get the symbol index (offset into string table)
 		symbol_index = -1 # should stand out when encoded as unsigned int
 		for i in range(len(self.symbol_table_index)):
 			if self.symbol_table_index[i] == symbol_name:
 				#self.logger.debug("Found symbol string at index %d in symbol table" % i)
 				symbol_index = i
+				break
 		
 		assert symbol_index == symbol_index_test # test to see if we need to keep the look up dict or just pass the value
 
-		relocation_entry_hex = struct.pack('IBBxx', offset, rel_type, symbol_index).encode('hex')
+		#FIXME: why is the entry being packed with padding??? furthermore, why is there no endianness specified?
+		#		this cannot be right... check the ELF spec also, use the functions to convert b/w to and from INFO word
+		relocation_entry_hex = struct.pack('IBBxx', reloc_offset, rel_type, symbol_index).encode('hex')
 
 		self.logger.debug("Relocation for symbol %s: %s" % (symbol_name, relocation_entry_hex))
 		
-		if rel_section == '.text' or rel_section == '.data' or rel_section == '.rodata':
+		#TODO: we really should be just creating "relocation entry objects"
+		#		upon Writing the ELF file (specifically this section) iterate over the objects, writing the bytes
+		if rel_section == '.text':
 			self.sections_hex['.rel' + rel_section] += relocation_entry_hex
 			"""
 			self.reloc_text.append(relocation_entry_hex)
@@ -371,23 +383,14 @@ class ELF:
 		return None
 		"""
 	
-	def BuildBaseSymbolTable(self, function_name, function_size, function_dict = {}):
+	def BuildBaseSymbolTable(self, function_name):
 		''' Builds the base symbol table for an ELF object
-			@note: if function_name is 'data' we are working with a data object file
 			@param function_name: name of function
-			@param function_size: integer size of funcion
-			@param function_dict: function names (undefined symbols) to include in this object file
-			
-			@note: currently, each function object file is getting a symbol for every other funciton (unnecessary)
-			@todo: see above note
-			
 		'''
-		# Builds the base symbol file with all of the static symbols
-		if function_name == 'data':
-			self.logger.debug("Building base symbol table for data object file")
-		else:
-			self.logger.debug("Building base symbol table for function %s, size 0x%x" % (function_name, function_size))
 		
+		logger.debug("Building base symbol table for function %s" % (function_name))
+		
+		# Create the default symbols for all object files
 		# first entry must be the null entry as per ELF spec
 		self.AddToSymbolTable('', 0, 0, STB_LOCAL, STT_NOTYPE, STO_DEFAULT, STN_UNDEF)
 		
@@ -399,7 +402,7 @@ class ELF:
 		current_section_index = 1 # index 0 is null section
 		for section in self.sections_present:
 			if ('.rel.' not in section) and (section not in ['.shstrtab', '.symtab', '.strtab']):
-				self.logger.debug("Adding SECTION symbol for '%s'" % section)
+				logger.debug("Adding SECTION symbol for '%s'" % section)
 				self.AddToSymbolTable('', 0, 0, STB_LOCAL, STT_SECTION, STO_DEFAULT, current_section_index)
 				
 			#else:
@@ -409,83 +412,59 @@ class ELF:
 			
 		
 		# Last entry is for the function itself (function_name)
-		if function_name != 'data':
-			symbol_name = function_name
-			st_value = 0
-			st_size = self.shdr_dict['.text']['size']
-			st_bind = STB_GLOBAL
-			st_type = STT_FUNC
-			st_other = STO_DEFAULT
-			#st_shndx = self.GetSectionIndexByName(function_name)
-			st_shndx = 1
-			self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
-		else:
-			pass
-			''' deprecated -- data.o references NO symbols
-			self.logger.debug("\tAdding function symbols:")
-			print "function_dict:"
-			print function_dict
-			for func_name in function_dict:
-				#TODO: space overhead can be huge if large number of functions - should add symbol only if/when it is referenced (e.g., by a relocation entry)
-				symbol_name = func_name
-				st_value = 0
-				st_size = 0
-				st_bind = STB_GLOBAL
-				st_type = STT_NOTYPE
-				st_other = STO_DEFAULT
-				st_shndx = STN_UNDEF
-				self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
-			'''
-	def AddTextSymbol(self, name, head, value, seg_name, sym_type = STT_OBJECT):
-		# Sound delinker - these will only be symbols used in a call
-		''' Adds a symbol to the symbol table for an object in the text section (i.e., call swap or mov ds:fptr, swap)
+		symbol_name = function_name
+		st_value = 0
+		st_size = self.shdr_dict['.text']['size']
+		st_bind = STB_GLOBAL
+		st_type = STT_FUNC
+		st_other = STO_DEFAULT
+		#st_shndx = self.GetSectionIndexByName(function_name)
+		st_shndx = 1
+		self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
+
+
+	def AddTextSymbol(self, symbol_name, symbol_type):
+		#TODO: this function bypasses AddToSymbolTable and directly adds an entry to self.symbol_table
+		#		a symbol table entry should probably only be added using one function
+		''' Adds a symbol to the symbol table that is referenced somewhere in the text section
+			(e.g., call f1, jmp f2, call printf@plt)
 			
 			@param name: name of symbol
-			@param head: absolute location of the symbol
-			@param value: symbol location as an offset into its segment
-			@param seg_name: name of segment that holds symbol
+			@param symbol_type: type of symbol (STT's in Constants.py)
 			
-			@return: location of this symbol as an integer offset into the symbol table
+			@return: location of the added symbol as an integer offset into the symbol table
 		'''
 		# these are undefined symbols that are defined in other object files (data.o or func.o)
 		
-		if name in self.symtab_dict:
+		if symbol_name in self.symtab_dict:
 			# already have an entry for this symbol
-			self.logger.warn("NOT adding symbol table entry for '%s' -- symbol name already present" % name)
-			#print self.symtab_dict
-			#exit("check AddTextSymbol")
-			'''
-		# just create the symbol for now even though it is not needed -- hopefully wont cause problems
-		elif head is a jump table head:
-			# jump tables dont get a symbol in symtab
-			self.logger.info("NOT adding symbol tabler entry for '%s' -- symbol is a jump table")
-			return False
-			'''
+			logger.warn("NOT adding symbol table entry for '%s' -- symbol name already present" % symbol_name)
+			
 		else:
-			#print "Found symbol: %s, %x %s, offset = %d " % (s, s, GetFunctionName(s), head - func_start)
-			self.logger.debug("Adding new text symbol: name: '%s', head: 0x%x, value: 0x%x" % (name, head, value))
+			logger.debug("Adding new text symbol: name: '%s'" % (symbol_name))
 			
 			value = 0
 			size = 0
 			st_bind = STB_GLOBAL # default to global for all symbols
-			st_type = sym_type
+			st_type = symbol_type
 			seg_ndx = 0 # STT_UNDEF
 			
 			# name in .symtab is index into string table
 			# we will use the self.strtab_offset that is saved within the object so that each new
 			# entry into the string table starts after the last string 
-			name_int = self.AddToStringTable(name)
+			name_int = self.AddToStringTable(symbol_name)
 			#seg_ndx = self.sections_present.index(seg_name) + 1
 			symtab_entry = struct.pack("IIIBBH", name_int, value, size, self.GetSTInfo(st_bind, st_type), STO_DEFAULT, seg_ndx).encode('hex')
 			
 			# Add this entry to the symbol table
 			self.symbol_table.append(symtab_entry)
-			self.symbol_table_index.append(name)
+			self.symbol_table_index.append(symbol_name)
 			
-			self.symtab_dict[name] = len(self.symbol_table) - 1 # the symbol table entry for symbol_name was the last entry added to symbol_table
+			self.symtab_dict[symbol_name] = len(self.symbol_table) - 1 # the symbol table entry for symbol_name was the last entry added to symbol_table
 		
 		#TODO: only returns correct value if the 'else' condition above is executed
-		return self.symtab_dict[name]
+		#		this actually doesn't seem to be true...
+		return self.symtab_dict[symbol_name]
 	
 	def AddToSymbolTable(self, symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx):
 		''' Processes a new symbol by crearing a symbol table entry with cooresponding string table entry
@@ -512,7 +491,7 @@ class ELF:
 		
 		'''
 		
-		"""
+		""" WTH is this for???
 		data_object = False
 		if func_start == 0:
 			#assert head == 0
@@ -678,98 +657,55 @@ class ELF:
 		print "new_section_hex: %s" % new_section_hex
 		return current_sections_hex + "00"*padding + new_section_hex
 	
-	def BuildFuncObject(self, text, function_name, stats, segment_ranges, functions):
+	def BuildFuncObject(self, function_bytes, function_name, t2t_references):
 		''' Builds an object file for function func_name
 			
-			@param text: raw bytes ot the text segment
-					#TODO: convert BuildDataObject to work on bytes, not hex
+			@param function_bytes: raw bytes ot the text segment
 			@param function_name: name of function
-			@param stats: holds all the info for patching, creating reloc entries and symbols
-			@param segment_ranges: (if we need them?)
-			@param function: (if we need them?)
+			@param t2t_references: list of tuples that define text-to-text references
+							(e.g., call f1, jmp f2, call printf@plt)
+							tuples are of the form: (offset into function where symbol is referenced,
+													 symbol name that is being referenced
+													)
 		'''
-		function_start = functions[function_name]['begin']
-		function_end = functions[function_name]['end']
 		
-		self.logger.debug("Building object for function %s [0x%08x - 0x%08x]" % (function_name, function_start, function_end ))
+		logger.debug("Building object for function %s" % (function_name))
 		
+		self.shdr_dict['.text']['size'] = len(function_bytes) # BuildBaseSymbolTable needs this set because it adds a symbol for the function
+																# the function symbol creation should probably be done elsewhere
+																# also note that the text size is also set in BuildText
+		self.BuildBaseSymbolTable(function_name)
 		
-		self.shdr_dict['.text']['size'] = len(text) / 2 # BuildBaseSymbolTable needs this set
-		self.BuildBaseSymbolTable(function_name, len(text) / 2, None)
-		
-		
-		for (offset_into_function, sym_name, offset_into_symbol, sym_type) in stats['datarefs']:
-			print "\tprocessing dataref: %s" % (str((offset_into_function, sym_name, offset_into_symbol, sym_type)))
-			unused = 0xffffffff
-			offset_into_data_seg = 0 # only need offset if symbol is defined in this object file??
-			size = 0
-			new_symbol_index = self.AddDataSymbol(sym_name, unused, offset_into_data_seg, size, None, sym_type) # size=0 for undefined
-			
-			self.AddRelocEntry(function_start, function_start + offset_into_function, 1, '.text', sym_name, new_symbol_index)
-			
-			if sym_type == 1: # 1 = STT_OBJ
-				#TODO: more efficient in the worst case to append to an array then call .join() 
-				text = text[0:offset_into_function] + struct.pack("<I", offset_into_symbol) + text[offset_into_function+4:]
-				print "\tpatched over address in dataref:%s @0x%08x" % (sym_name, function_start + offset_into_function)
-			else:
-				exit("implement this ytrer")
-			
-		for (offset_into_function, sym_name, offset_into_symbol, sym_type) in stats['coderefs']:
-			
-			print "\tprocessing coderef: %s" % (str((offset_into_function, sym_name, offset_into_symbol, sym_type)))
+		# add all of the undefined symbols and relocation entries for each item in t2t_references
+		for (offset, symbol_name) in t2t_references:
+			print "\tprocessing refernce to symbol: %s" % symbol_name
 			
 			# make sure we are dealing with an external symbol
-			# may need to account for the assertion below if code pointers point to their own function
-			assert sym_name != function_name
-			# at this point, these will be externally defined (undefined) text symbols (names of other functions)
+			# this should never happen... any? self-referencing operand would be encoded as PC-relative 
+			assert symbol_name != function_name
 			
-			unused = 0xffffffff
+			new_symbol_index = self.AddTextSymbol(symbol_name, STT_NOTYPE)
 			
-			""" moved into Delinker_mod::CollectStats
-			# determine if this is a call to a library function
-			if idc.SegName(idc.GetOperandValue(idc.ItemHead(function_start + offset_into_function),0)) == '.plt':
-				if sym_name.startswith('.'):
-					sym_name = sym_name[1:]
-					self.logger.info("plt function symbol name changed from %s to %s" % ('.'+sym_name, sym_name))
-			"""
+			# add the relocation entry
+			self.AddRelocEntry(offset, R_386_PC32, '.text', symbol_name, new_symbol_index)
 			
-			new_symbol_index = self.AddTextSymbol(sym_name, unused, unused, '.text', sym_type)
-			
-			# add a relocation entry (there will always be one since we are in text
-			self.AddRelocEntry(function_start, function_start + offset_into_function, 2, '.text', sym_name, new_symbol_index)
-			
-			if sym_type == STT_NOTYPE: # call to externally defined function (once we delink each function)
-				# text = text[0:offset_into_function] + struct.pack("<I", -4) + text[offset_into_function+4:]
-				text = text[0:offset_into_function] + '\xfc\xff\xff\xff' + text[offset_into_function+4:]
-				print "\tpatched over address in 'call %s' @0x%08x" % (sym_name, function_start + offset_into_function)
-			else:
-				exit("implement this krjng")
+			# call to externally defined function (once we delink each function)
+			# text = text[0:offset_into_function] + struct.pack("<I", -4) + text[offset_into_function+4:]
+			function_bytes = function_bytes[0:offset] + '\xfc\xff\xff\xff' + function_bytes[offset+4:]
+			print "\tpatched over address in 'call %s' at offset 0x%08x" % (symbol_name, offset)
+
 		
-		for (offset_into_function, sym_name, offset_into_symbol, sym_type) in stats['immrefs']:
-			print "\tprocessing immref: %s" % (str((offset_into_function, sym_name, offset_into_symbol, sym_type)))
-			
-			unused = 0xffffffff
-			
-			new_symbol_index = self.AddTextSymbol(sym_name, unused, unused, '.text', sym_type)
-			
-			# add a relocation entry (there will always be one since we are in text)
-			self.AddRelocEntry(function_start, function_start + offset_into_function, 1, '.text', sym_name, new_symbol_index)
-			
-			if sym_type == STT_NOTYPE:
-				text = text[0:offset_into_function] + struct.pack("<I", offset_into_symbol) + text[offset_into_function+4:]
-				print "\tpatched over imm value at 0x%08x pointing to symbol %s+%d" % (function_start + offset_into_function, sym_name, offset_into_symbol)
-			else:
-				exit("implement this idnche")
+
 		
 		# !! self.reloc_text and self.ELFs[function_name].reloc_text are different 
 		# below will not work - BuildText expects 
-		self.BuildText(text, function_end - function_start)
+		self.BuildText(function_bytes)
 	
 		# Build final ELF
 		self.BuildELF(function_name)
 		
 	
-	def BuildText(self, code, size):
+	def BuildText(self, code):
 		''' Copies and 'unpatches' the function code
 			TODO: size parameter not needed
 		
@@ -777,38 +713,24 @@ class ELF:
 						size - integer size in bytes of the function
 						XXXXtext_relocs - list of relocations that need to be applied
 		'''
-		self.logger.debug("Building .text section")
-		self.logger.debug("\t.text size 0x%08x" % len(code))
+		logger.debug("Building .text section")
 		
-		assert size == len(code)
-		
+		size = len(code)
+		logger.debug("\t.text size 0x%08x" % size)
 		
 		# below is deprecated -- now we are patching in Delinker_mod in for loop in BuildFuncObject
 		#self.sections_hex['.text'] = self.PatchText(code, text_relocs) # right now just convert to hex
 		code = code.encode('hex')
 		self.sections_hex['.text'] = code
-		self.shdr_dict['.text']['size'] = len(self.sections_hex['.text']) / 2 # assuming hex
+		self.shdr_dict['.text']['size'] = size # size in bytes
 		
-		""" deprecated -- not using self.reloc_text; setting size in WriteELF..
-		# TODO: we have alreay (in this function... yet to be coded) handled the data relocs
-		# so set the .rel.text in section_hex and size in shdr_dict 
-		print self.shdr_dict['.rel.text']['size']
-		self.logger.debug("setting shdr_dict['.rel.text']['size'] -- %d .rel.text entries total" % len(self.sections_hex['.']))
-		
-		self.shdr_dict['.rel.text']['size'] = RELOCTAB_ENTRY_SIZE * len(self.reloc_text)
-		#self.logger.debug("Text size %d" % shdr_dict['.text']['size'])
-		"""
 
 	def BuildELF(self, function_name):
 		''' Responsible for creating the final ELF object file
 			@param function_name: name of the function
-			@note: if function_name is 'data' then we are building the data object, o/w it is a function object
 		'''
-		if function_name == 'data':
-			self.logger.debug("Building object for all data sections")
-			#self.data_object = ELFManip.ELF('')
-		else:
-			self.logger.debug("Building object for function %s" % function_name)
+
+		self.logger.debug("Building object for function %s" % function_name)
 			
 			
 		# We are going to set all the remaining sizes in the section header table
@@ -854,10 +776,7 @@ class ELF:
 				  
 			Attributes: function_name - name of function
 		'''
-		if function_name == '':
-			is_data_object = True
-		else:
-			is_data_object = False
+
 		
 		self.BuildElfHeader() # not passing sh_tab_offset -- compute and patch in WriteELFObject
 		out = self.elfhdr
@@ -948,19 +867,19 @@ class ELF:
 		
 		try:
 			#TODO: use python path manip funcitons to construct path
-			path = "delinked/%s" % (self.bin_filename)#, self.obj_filename)
+			path = "delinked/%s" % (self.obj_filename)
 			os.makedirs(path)
 		except OSError:
 			if not os.path.isdir(path):
-				self.logger.error("Could not create directory %s" % path)
-				return
-		if is_data_object:
-			obj_file = "%s/data.o" % path
-		else:
-			obj_file = "%s/%s.o" % (path, function_name)
+				logger.error("Could not create directory %s" % path)
+			else:
+				logger.error("unbhandled exception in WriteELFObject")
+			return
+
+		obj_file = "%s/%s.o" % (path, function_name)
 
 		with open (obj_file, "wb") as f:
-			self.logger.info("Wrote %s" % obj_file)
+			logger.info("Wrote %s" % obj_file)
 			f.write(obj)
 		
 		print '\n'*4
