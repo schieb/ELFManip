@@ -412,14 +412,18 @@ class ELF:
 			
 		
 		# Last entry is for the function itself (function_name)
-		symbol_name = function_name
+		if function_name == "main":
+			symbol_name = "_delinked_" + function_name
+		else:
+			symbol_name = function_name
 		st_value = 0
 		st_size = self.shdr_dict['.text']['size']
 		st_bind = STB_GLOBAL
 		st_type = STT_FUNC
 		st_other = STO_DEFAULT
+		#TODO: implement GetSectionIndexByName
 		#st_shndx = self.GetSectionIndexByName(function_name)
-		st_shndx = 1
+		st_shndx = 1 # this is a hack
 		self.AddToSymbolTable(symbol_name, st_value, st_size, st_bind, st_type, st_other, st_shndx)
 
 
@@ -865,16 +869,17 @@ class ELF:
 		
 		obj = bytearray(tmp_bytes)
 		
-		try:
-			#TODO: use python path manip funcitons to construct path
-			path = "delinked/%s" % (self.obj_filename)
-			os.makedirs(path)
-		except OSError:
-			if not os.path.isdir(path):
-				logger.error("Could not create directory %s" % path)
-			else:
-				logger.error("unbhandled exception in WriteELFObject")
-			return
+		#TODO: use python path manip funcitons to construct path
+		path = "delinked/%s" % (self.obj_filename)
+		if not os.path.isdir(path):
+			try:
+				os.makedirs(path)
+			except OSError:
+				if not os.path.isdir(path):
+					logger.error("Could not create directory %s" % path)
+				else:
+					logger.error("unbhandled exception in WriteELFObject")
+				return
 
 		obj_file = "%s/%s.o" % (path, function_name)
 
