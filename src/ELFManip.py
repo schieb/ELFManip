@@ -10,7 +10,7 @@ logger.setLevel(logging.DEBUG)
 sh = logging.StreamHandler()
 sh.setFormatter(logging.Formatter('%(levelname)s   %(module)s.%(funcName)s :: %(message)s'))
 logger.addHandler(sh)
-logger.propagate = False # turn off propagation to root handler prevents duplicate log entries
+logger.propagate = False
 
 from __builtin__ import bytearray
 
@@ -845,7 +845,7 @@ class ELF:
 		obj = bytearray(tmp_bytes)
 		
 		#TODO: use python path manip funcitons to construct path
-		path = "delinked/%s" % (self.obj_filename)
+		path = "delinked"
 		if not os.path.isdir(path):
 			try:
 				os.makedirs(path)
