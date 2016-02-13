@@ -8,19 +8,16 @@ import logging
 logger = logging.getLogger("ELFManip")
 logger.setLevel(logging.DEBUG)
 sh = logging.StreamHandler()
-sh.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+sh.setFormatter(logging.Formatter('%(levelname)s   %(module)s.%(funcName)s :: %(message)s'))
 logger.addHandler(sh)
 logger.propagate = False # turn off propagation to root handler prevents duplicate log entries
 
-#import idc, idautils
 from __builtin__ import bytearray
-#from idc import SEGATTR_ALIGN
 
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
 
-#output_base_path = "Z:\\delinker-test\\output"
-LOG_LEVEL = 4
+
 
 # order of section headers as they should appear in table of section headers
 section_header_order = ['.text', '.data', '.bss', '.rodata', '.rel.text', '.rel.data', '.rel.rodata', '.shstrtab', '.symtab', '.strtab']
@@ -30,33 +27,11 @@ persistent_sections = ['.text', '.data', '.bss'] # sections that should (must?) 
 # Comment section... 
 COMMENT = "Produced by Delinker"
 COMMENT_HEX = "00"+binascii.hexlify(COMMENT)+"00" # start and end with null byte
-
-
-class Logger:
-	def __init__(self, log_level):
-		self.log_level=log_level
-	
-	def error(self, msg):
-		if self.log_level >= 1:
-			print "[ERROR] - %s" % msg
-			
-	def warn(self, msg):
-		if self.log_level >= 2:
-			print "[WARNING] - %s" % msg
-	
-	def info(self, msg):
-		if self.log_level >= 3:
-			print "[INFO] - %s" % msg
-			
-	def debug(self, msg):
-		if self.log_level >= 4:
-			print "[DEBUG] - %s" % msg
 	
 class ELF:
 	
 	def __init__(self, obj_filename, log_level=4):
-		self.logger = Logger(log_level)
-		self.logger.info("Initializing ELF object '%s'" % obj_filename)
+		logger.info("Initializing ELF object '%s'" % obj_filename)
 		self.obj_filename = obj_filename
 		self.elfhdr = ''
 		
@@ -153,7 +128,7 @@ class ELF:
 			@todo: this function does too much (see note below)
 			@note: sets sections_present; shdr_dict['.shstrtab']['size']; sections_hex['.shstrtab']
 		'''
-		self.logger.debug("Setting sections_present and sections_hex['.shstrtab']")
+		logger.debug("Setting sections_present and sections_hex['.shstrtab']")
 		
 		#TODO: unslopify
 		# remove unused sections from self.sections_present
@@ -163,11 +138,11 @@ class ELF:
 				continue
 			if ((s['size'] == 0) and (section_name not in persistent_sections)):
 				# remove from sections_present
-				self.logger.debug("NOT adding section %s: name 0x%x, size 0x%x" % (section_name, s['name'], s['size']))
+				logger.debug("NOT adding section %s: name 0x%x, size 0x%x" % (section_name, s['name'], s['size']))
 				if section_name in self.sections_present:
 					self.sections_present.remove(section_name)
 				
-		self.logger.debug("sections to be added: %s" % self.sections_present)
+		logger.debug("sections to be added: %s" % self.sections_present)
 		
 		# now that we know what sections are present we can set the size of .shstrtab
 		self.shdr_dict['.shstrtab']['size'] = sum(len(section)+1 for section in self.sections_present)+1 # +1 for each null char (initial and terminators)
@@ -224,12 +199,12 @@ class ELF:
 				''' this was here before sound delinker when it was assumed to be nearly impossible for an object file to reference no symbols
 					but this is exactly what data.o does
 				'''
-				#self.logger.warn("Cannot determine info field for symtab sh entry")
+				#logger.warn("Cannot determine info field for symtab sh entry")
 				pass
 				
 			return index
 		
-		self.logger.debug("Building section headers")
+		logger.debug("Building section headers")
 		assert self.shdr_table == [] # must start with empty table
 		
 		# Manually add first section header entry (mandatory null entry)
@@ -251,7 +226,7 @@ class ELF:
 					s['info'] = GetSymTabInfoField() # symtab index one greater than the last local symbol (binding STB_LOCAL)
 					
 				# Add section entry to section header table
-				#self.logger.debug("Adding section %s:\t name 0x%x, offset 0x%x, size 0x%x" % (section_name, s['name'], s['offset'], s['size']))
+				#logger.debug("Adding section %s:\t name 0x%x, offset 0x%x, size 0x%x" % (section_name, s['name'], s['offset'], s['size']))
 				shdr_hex = struct.pack("IIIIIIIIII", s['name'], s['type'], s['flags'], s['addr'], s['offset'], s['size'], s['link'], s['info'], s['addralign'], s['entsize']).encode('hex')
 				self.shdr_table.append(shdr_hex)
 	
@@ -299,7 +274,7 @@ class ELF:
 		
 		
 		if symbol_name not in self.strtab_dict:
-			self.logger.error("%s not found in string table" % symbol_name)
+			logger.error("%s not found in string table" % symbol_name)
 			exit("fix error")
 		
 		#TODO: abstract the following to a class fucntion
@@ -307,7 +282,7 @@ class ELF:
 		symbol_index = -1 # should stand out when encoded as unsigned int
 		for i in range(len(self.symbol_table_index)):
 			if self.symbol_table_index[i] == symbol_name:
-				#self.logger.debug("Found symbol string at index %d in symbol table" % i)
+				#logger.debug("Found symbol string at index %d in symbol table" % i)
 				symbol_index = i
 				break
 		
@@ -317,7 +292,7 @@ class ELF:
 		#		this cannot be right... check the ELF spec also, use the functions to convert b/w to and from INFO word
 		relocation_entry_hex = struct.pack('IBBxx', reloc_offset, rel_type, symbol_index).encode('hex')
 
-		self.logger.debug("Relocation for symbol %s: %s" % (symbol_name, relocation_entry_hex))
+		logger.debug("Relocation for symbol %s: %s" % (symbol_name, relocation_entry_hex))
 		
 		#TODO: we really should be just creating "relocation entry objects"
 		#		upon Writing the ELF file (specifically this section) iterate over the objects, writing the bytes
@@ -345,19 +320,19 @@ class ELF:
 			@param name: string name
 		'''
 		if name not in self.strtab_dict:
-			self.logger.debug("\tAdding '%s' to string table at offset %d" % (name, self.strtab_offset))
+			logger.debug("\tAdding '%s' to string table at offset %d" % (name, self.strtab_offset))
 			name = str(name) # cast to str if not already (o/w encode and len will fail)
 			self.str_table.append(name.encode('hex') + "00")
 			self.strtab_dict[name] = self.strtab_offset
 			self.strtab_offset += len(name)+1
 			
 			#print "str_table: %s" % (str(self.str_table))
-			print "self.strtab_dict:", self.strtab_dict
+			#print "self.strtab_dict:", self.strtab_dict
 			
-			print "current string table:"
-			self.PrintStringTable()
+			#print "current string table:"
+			#self.PrintStringTable()
 		else:
-			self.logger.debug("\tNot adding '%s' to string table (already present)" % name)
+			logger.debug("\tNot adding '%s' to string table (already present)" % name)
 			
 		return self.strtab_dict[name]
 	
@@ -379,7 +354,7 @@ class ELF:
 		for name in self.sections_hex['.shstrtab'].split('\0'):
 			pass
 		#TODO: when this breaks, refactor BuildBaseSymbolTable and possibly the data structures it uses
-		self.logger.warn("Could not find section entry for %s in symbol table" % section_name)
+		logger.warn("Could not find section entry for %s in symbol table" % section_name)
 		return None
 		"""
 	
@@ -500,7 +475,7 @@ class ELF:
 		if func_start == 0:
 			#assert head == 0
 			data_object = True
-			self.logger.debug("Adding %s to symbol table for DATA object" % (symbol_name)) 
+			logger.debug("Adding %s to symbol table for DATA object" % (symbol_name)) 
 			if seg_name == '.text':
 				# pointers from data to text are undefined, global, NOTYPE, and have size=0
 				size = 0
@@ -525,14 +500,14 @@ class ELF:
 				size = 0
 				type = STT_NOTYPE
 			else:
-				self.logger.error("Unsupported seg_name:'%s' in AddToSymbolTable" % seg_name)
+				logger.error("Unsupported seg_name:'%s' in AddToSymbolTable" % seg_name)
 				exit()
 		elif func_start == 0xffffffff:
 			# AddToSymbolTable was called with 
 			data_object = True
 			type = STT_OBJECT
 		else:
-			self.logger.debug("Adding to symbol table for FUNCTION object")
+			logger.debug("Adding to symbol table for FUNCTION object")
 			exit("delinking a function... finish testing data object first")
 			
 		# validate seg_name and set Ndx
@@ -567,14 +542,14 @@ class ELF:
 		
 		if symbol_name in self.symtab_dict and st_type != STT_SECTION:
 			# already have an entry for this symbol (assumes unique names)
-			self.logger.warn("NOT adding symbol table entry for '%s' -- symbol name already present" % symbol_name)
+			logger.warn("NOT adding symbol table entry for '%s' -- symbol name already present" % symbol_name)
 			#print self.symtab_dict
 		else:
 			#print "Found symbol: %s, %x %s, offset = %d " % (s, s, GetFunctionName(s), head - func_start)
 			if st_type == STT_SECTION:
-				self.logger.debug("Adding symbol entry for section [?]" )
+				logger.debug("Adding symbol entry for section [?]" )
 			else:
-				self.logger.debug("Adding new data symbol: name: '%s', value: %s, strtab offset: %d" % (symbol_name, st_value, self.strtab_offset))
+				logger.debug("Adding new data symbol: name: '%s', value: %s, strtab offset: %d" % (symbol_name, st_value, self.strtab_offset))
 			# name in .symtab is index into string table
 			# we will use the self.strtab_offset that is saved within the object so that each new
 			# entry into the string table starts after the last string 
@@ -649,16 +624,16 @@ class ELF:
 		
 		if name == '.bss': # bss holds no data but has a size -- this is handled in gcc by looking at section's Type field
 			assert new_section_hex == ''
-			self.logger.debug("Concat *NOBITS* section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
+			logger.debug("Concat *NOBITS* section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
 
 		elif new_section_hex == '' and self.shdr_dict[name]['size'] != 0:
 			# section has undefined content but size > 0 : *assume* section will be patched in later, so fill with 0xff's
 			new_section_hex = 'FF'*self.shdr_dict[name]['size']
-			self.logger.debug("Concat *UNDEFINED* section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
+			logger.debug("Concat *UNDEFINED* section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
 		else:
-			self.logger.debug("Concat section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
+			logger.debug("Concat section %s: \toffset 0x%x, size 0x%x" % (name, self.shdr_dict[name]['offset'], self.shdr_dict[name]['size']))
 			
-		print "new_section_hex: %s" % new_section_hex
+		#print "new_section_hex: %s" % new_section_hex
 		return current_sections_hex + "00"*padding + new_section_hex
 	
 	def BuildFuncObject(self, function_bytes, function_name, t2t_references):
@@ -682,7 +657,7 @@ class ELF:
 		
 		# add all of the undefined symbols and relocation entries for each item in t2t_references
 		for (offset, symbol_name) in t2t_references:
-			print "\tprocessing refernce to symbol: %s" % symbol_name
+			logger.debug("\tprocessing refernce to symbol: %s" % symbol_name)
 			
 			# make sure we are dealing with an external symbol
 			# this should never happen... any? self-referencing operand would be encoded as PC-relative 
@@ -696,7 +671,7 @@ class ELF:
 			# call to externally defined function (once we delink each function)
 			# text = text[0:offset_into_function] + struct.pack("<I", -4) + text[offset_into_function+4:]
 			function_bytes = function_bytes[0:offset] + '\xfc\xff\xff\xff' + function_bytes[offset+4:]
-			print "\tpatched over address in 'call %s' at offset 0x%08x" % (symbol_name, offset)
+			logger.debug("\tpatched over address in 'call %s' at offset 0x%08x" % (symbol_name, offset))
 
 		
 
@@ -734,17 +709,17 @@ class ELF:
 			@param function_name: name of the function
 		'''
 
-		self.logger.debug("Building object for function %s" % function_name)
+		logger.debug("Building object for function %s" % function_name)
 			
 			
 		# We are going to set all the remaining sizes in the section header table
 		# so we can pass this data structure to the BuildSectionHeaders function
 		
 		#TODO: these do not belong here, move after relocs are handled properly
-		self.logger.debug("setting shdr_dict['.symtab']['size'] -- %d symtab entries total" % len(self.symbol_table))
+		logger.debug("setting shdr_dict['.symtab']['size'] -- %d symtab entries total" % len(self.symbol_table))
 		self.shdr_dict['.symtab']['size'] = SYMTAB_ENTRY_SIZE * len(self.symbol_table)
 		
-		self.logger.debug("setting shdr_dict['.strtab']['size'] -- %d strtab entries total" % (len(self.str_table)+1))
+		logger.debug("setting shdr_dict['.strtab']['size'] -- %d strtab entries total" % (len(self.str_table)+1))
 		self.shdr_dict['.strtab']['size'] = (len("".join(self.str_table))/ 2) +1
 		
 		
@@ -825,22 +800,22 @@ class ELF:
 		
 		#TODO: this does not need to be here
 		# patch sh_tab_offset, shnum, and shstrndx into elf header
-		print "patching shoff 0x%x into ELF header" % sh_tab_offset
+		logger.debug("patching shoff 0x%x into ELF header" % sh_tab_offset)
 		out = self.PatchBytes(out, struct.pack("I", sh_tab_offset).encode('hex'), 64)
-		print "patching shnum %d into ELF header" % (len(self.sections_present) + 1)
+		logger.debug("patching shnum %d into ELF header" % (len(self.sections_present) + 1))
 		out = self.PatchBytes(out, struct.pack('H', len(self.sections_present)+1).encode('hex'), 0x30*2)
-		print "patching shstrndx %d into ELF header" % (self.sections_present.index('.shstrtab') + 1)
+		logger.debug("patching shstrndx %d into ELF header" % (self.sections_present.index('.shstrtab') + 1))
 		############
 		out = self.PatchBytes(out, struct.pack('H', self.sections_present.index('.shstrtab')+1).encode('hex'), 0x32*2)
 		############
 		
 		# patch in the section header string table
-		print "patching section header string table"
+		logger.debug("patching section header string table")
 		out = self.PatchBytes(out, self.sections_hex['.shstrtab'], self.shdr_dict['.shstrtab']['offset']*2)
 		
 		# append section header table place holder (still don't have offset of the remaining sections - symtab and strtab)
 		sh_offset = len(out)
-		self.logger.debug("Concat manual 'section headers': \toffset 0x%x, size 0x%x" % (sh_offset, (len(self.sections_present)+1)*SHDR_ENTRY_SIZE))
+		logger.debug("Concat manual 'section headers': \toffset 0x%x, size 0x%x" % (sh_offset, (len(self.sections_present)+1)*SHDR_ENTRY_SIZE))
 		# already padded so just append the place holder
 		out += 'FF'*(len(self.sections_present)+1)*SHDR_ENTRY_SIZE
 		#TODO: ^ concat instead (must delegate as faux section first)
@@ -860,7 +835,7 @@ class ELF:
 		# all sections now have their offsets defined
 		self.BuildSectionHeaders(self.shdr_dict) # should be called as late as possible
 		# patch in the section headers starting at offset sh_offset, size len(''.join(self.shdr_table))/2
-		print "patching in the section header table at offset 0x%x and size 0x%x" % (sh_offset, len(''.join(self.shdr_table)))
+		logger.debug("patching in the section header table at offset 0x%x and size 0x%x" % (sh_offset, len(''.join(self.shdr_table))))
 		out = self.PatchBytes(out, ''.join(self.shdr_table), sh_offset)
 		
 		
