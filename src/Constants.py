@@ -62,3 +62,21 @@ STO_DEFAULT = 0
 # Relocation entry::Type of reference
 R_386_32   = 1 # (absolute)
 R_386_PC32 = 2 # (indirect)
+
+PT_NULL     = 0
+PT_LOAD     = 1
+PT_DYNAMIC  = 2
+PT_INTERP   = 3
+PT_NOTE     = 4
+PT_SHHLIB   = 5
+PT_PHDR     = 6
+PT_LOPROC   = 0x70000000
+PT_HIPROC   = 0x7fffffff
+
+PF_X        = (1 << 0)
+PF_W        = (1 << 1)
+PF_R        = (1 << 2)
+PF_MASKOS   = 0x0ff00000
+PF_MASKPROC = 0xf0000000
+
+
