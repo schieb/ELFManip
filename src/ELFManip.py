@@ -20,6 +20,10 @@ SH_OFFSET       = 0x20
 NUM_PH_OFFSET   = 0x2c
 NUM_SH_OFFSET   = 0x30
 
+PH_START        = 52
+
+PAGESIZE = 0x1000
+
 class ELFManip:
     def __init__(self, in_file):
         '''
@@ -47,14 +51,16 @@ class ELFManip:
     
     
     class Section():
-        def __init__(self, contents):
+        def __init__(self, contents):#, name=None):
             '''
             @param contents: file containing section contents
             '''
             self.filename = contents
+            #if name is None:
+            #    name = '.' + self.filename
             
             # elements with value None are defined when the section is written to the output file
-            self.sh_name = 0
+            self.sh_name = 0x1f # randomish name from the section header string table
             self.sh_type = SHT_PROGBITS
             self.sh_flags = SHF_ALLOC | SHF_EXECINSTR | SHF_WRITE
             self.sh_addr = None
@@ -115,14 +121,14 @@ class ELFManip:
         def dump_entry(self):
             return struct.pack("<8i", 
                                self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
-                               self.p_fileze, self.p_memsz, self.flags, self.p_align)
+                               self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
         
     
             
     def add_section(self, contents):
         self.new_sections.append(self.Section(contents))
         
-    def add_segment(self, sections, load_addr):
+    def _add_segment(self, sections, load_addr):
         # add a segment that will contain all of the sections in 'sections'
         self.new_segments.append(self.Segment(sections, load_addr))
         
@@ -144,14 +150,15 @@ class ELFManip:
         
         # copy the entire file first
         copy(self.filename, outfile)
-        with open(outfile, "a+b") as f:
+        with open(outfile, "r+b") as f:
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.new_sections:
                 current = f.tell()
                 
                 # pad to section alignment
-                padding = section.sh_addralign - (current % section.sh_addralign)
+                #padding = section.sh_addralign - (current % section.sh_addralign)
+                padding = PAGESIZE - (current % PAGESIZE)
                 f.write("\x00"*padding)
                 section_offset = current + padding
                 
@@ -160,12 +167,14 @@ class ELFManip:
                 section_end = f.tell()
                 
                 # update the offset and size fields in the section header entry
-                section.sh_addr = self.image_base + section_offset
+                #section.sh_addr = self.image_base + section_offset
+                
+                section.sh_addr = 0x0804b000 # one page after bss
                 section.sh_offset = section_offset
                 section.sh_size = section_end - section_offset
             
             
-            self.add_segment(self.new_sections, 0x09000000)
+            #self._add_segment(self.new_sections, 0x08047000)
             
             # copy the section headers to the end of the file
             current = f.tell()
@@ -175,22 +184,68 @@ class ELFManip:
             section_headers = self.get_section_headers()
             f.write(section_headers)
             
-            logger.log_info("Appending %d section header entries", len(self.new_sections))
+            
+            logger.info("Appending %d section header entries", len(self.new_sections))
             f.write(''.join(section.dump_entry() for section in self.new_sections))
             
+            
+            
             # copy the program headers to the end of the file
+            ''' this is not possible. get the following error in the most basic case possible:
+                    Inconsistency detected by ld.so: rtld.c: 1290: dl_main: Assertion `_rtld_local._dl_rtld_map.l_libname' failed!
+                    
             current = f.tell()
+            #padding = PAGESIZE - (current % PAGESIZE)
             padding = 0x10 - (current % 0x10)
+            
             f.write("\x00" * padding)
             new_ph_offset = f.tell()
             program_headers = self.get_program_headers()
             f.write(program_headers)
+            '''
             
-            logger.log_info("Appending %d program header entries", len(self.new_sections))
-            f.write(''.join(section.dump_entry() for section in self.new_sections))
+            '''
+            logger.info("Appending %d program header entries", len(self.new_sections))
+            f.write(''.join(segment.dump_entry() for segment in self.new_segments))
+            '''
             
             new_entry_point = self.elf.header.e_entry # use default entry point for now
-            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections), new_ph_offset, len(self.new_segments))
+            
+            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections), None, 0)
+            #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections) , None, len(self.new_segments))
+            
+            
+            
+            # patch the program header R/X segment in a hack way for testing
+            # p_vaddr
+            #f.seek(PH_START + 32*2 + 4*2)
+            #f.write(struct.pack("<i", 0x08047000))
+            
+            # p_filsz
+            f.seek(PH_START + 32*2 + 4*4)
+            old_size = struct.unpack("<i", f.read(4))[0]
+            new_size = old_size + 0x3000
+            f.seek(PH_START + 32*2 + 4*4)
+            f.write(struct.pack("<i", new_size))
+            
+            # p_memsz
+            f.seek(PH_START + 32*2 + 4*5)
+            f.write(struct.pack("<i", new_size))
+            
+            
+            # debugging bus error...
+            # pad to 0x3000 then write the file again
+            f.seek(0, 2)
+            current = f.tell()
+            print hex(current)
+            
+            padding = 0x3000 - current
+            f.write("\x00" * padding)
+            print hex(f.tell())
+            
+            self.write_from_file(f, self.new_sections[0].filename)
+            print hex(f.tell())
+            
     
     def get_section_headers(self):
         sh_offset = self.elf.header.e_shoff
@@ -213,6 +268,7 @@ class ELFManip:
         return program_headers
     
     def patch_elf_header(self, f, new_entry_point, new_sh_offset, num_new_sh, new_ph_offset, num_new_ph):
+        #with open(filename, "r+b")
         f.seek(EP_OFFSET)
         f.write(struct.pack("<i", new_entry_point))
         
@@ -221,10 +277,11 @@ class ELFManip:
         f.seek(NUM_SH_OFFSET)
         f.write(struct.pack("<h", self.elf.header.e_shnum + num_new_sh))
         
-        f.seek(PH_OFFSET)
-        f.write(struct.pack("<i", new_ph_offset))
-        f.seek(NUM_PH_OFFSET)
-        f.write(struct.pack("<h", self.elf.header.e_phnum + num_new_ph))
+        if new_ph_offset is not None:
+            f.seek(PH_OFFSET)
+            f.write(struct.pack("<i", new_ph_offset))
+            f.seek(NUM_PH_OFFSET)
+            f.write(struct.pack("<h", self.elf.header.e_phnum + num_new_ph))
         
         
 def iter_chunks(file_object, block_size=1024):
