@@ -1,6 +1,24 @@
+'''
+TODO:
+    Must-dos:
+    - do what I did for segments to the sections
+    - propogate rearchitecture to write_new_elf()
+        - need more automation, less hard-coding during section writing and segment updating
+        - move program headers into free space between segments (segment padding) if there is enough room
+    - add method to move program headers into the .note.* sections (and move .interp)
+    
+    Features:
+    - option to name the section when adding it
+    - specify section attributes
+
+
+'''
+ 
+ 
 from Constants import *
 
 from elftools.elf.elffile import ELFFile
+from elftools.elf.descriptions import describe_sh_flags
 
 import struct
 import os
@@ -24,7 +42,7 @@ PH_START        = 52
 
 PAGESIZE = 0x1000
 
-class ELFManip:
+class ELFManip(object):
     def __init__(self, in_file):
         '''
         @param in_file: the ELF executable
@@ -33,11 +51,21 @@ class ELFManip:
         self._f = open(self.filename, "rb")
         self.elf = ELFFile(self._f)
         
+        self.new_sections = []
+        #self.new_segments = [] # segment(s) to hold the new sections
+        
         self.image_base = self._get_image_base()
         logger.info("Image base: 0x%08x", self.image_base)
+        if self.image_base != 0x08048000:
+            logger.error("strange image base 0x%08x. Need to check that no code assumes 0x08048000 as the base", self.image_base)
+            exit()
         
-        self.new_sections = []
-        self.new_segments = [] # segment(s) to hold the new sections
+        
+        self.phdrs = {'base': None, 'max_num': self.elf['e_phnum'], 'entries': []}
+        self.relocate_phdrs()
+        
+        self.copy_phdrs()
+        
         
     def _get_image_base(self):
         base = None
@@ -49,88 +77,65 @@ class ELFManip:
                     base = segment.header.p_vaddr
         return base
     
-    
-    class Section():
-        def __init__(self, contents):#, name=None):
-            '''
-            @param contents: file containing section contents
-            '''
-            self.filename = contents
-            #if name is None:
-            #    name = '.' + self.filename
+    def relocate_phdrs(self):
+        # find the gap between 'AX' and 'WA' segments
+        logger.debug("Looking for sufficient padding between LOAD segments to relocate the PHDRs to")
+        section_before_padding = None
+        section_after_padding = None
+        
+        #TODO: generalize this to handle unordered section header entries
+        for section in self.elf.iter_sections():
+            if section['sh_flags'] & SHF_WRITE:
+                section_after_padding = section
+                break
+            else:
+                section_before_padding = section
+                
+        logger.debug("Sections on either side of the segment padding: [%s, %s]", section_before_padding.name, section_after_padding.name)
+        
+        free_space_start = section_before_padding['sh_offset'] + section_before_padding['sh_size']
+        free_space_size = section_after_padding['sh_offset'] - free_space_start
+        
+        logger.debug("Found %d bytes of padding. Thats enough for %d entries of size %d each.",
+                     free_space_size, free_space_size / self.elf.header.e_phentsize, self.elf.header.e_phentsize)
+        
+        # assume we need space for at least one more entry
+        minimum_required_space = (self.elf.header.e_phnum + 1) * self.elf.header.e_phentsize
+        if free_space_size >= minimum_required_space:
+            logger.debug("Found enough space to move the program headers!")
+        else:
+            logger.error("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
+                        " or moving the .interp section and removing the .note.* sections")
+            exit()
             
-            # elements with value None are defined when the section is written to the output file
-            self.sh_name = 0x1f # randomish name from the section header string table
-            self.sh_type = SHT_PROGBITS
-            self.sh_flags = SHF_ALLOC | SHF_EXECINSTR | SHF_WRITE
-            self.sh_addr = None
-            self.sh_offset = None
-            self.sh_size = None
-            self.sh_link = SHN_UNDEF
-            self.sh_info = 0
-            self.sh_addralign = 0x10
-            self.sh_entsize = 0
+        # ensure that this space is actually empty
+        with open(self.filename) as f:
+            f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
+            padding_bytes = f.read(free_space_size)
+            for b in padding_bytes:
+                assert b == "\x00"
+                
+        #TODO: check using a sound method (i.e., check that there is section located in these bytes, also section headers and program headers could
+        #        technically be located here
+        # basically we need to check everything before we can say for sure that this space is unused
         
-        def dump_entry(self):
-            return struct.pack("<10i", 
-                               self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
-                               self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
-                               self.sh_addralign, self.sh_entsize)
-            
-    class Segment():
-        def __init__(self, sections, load_addr):
-            ''' 
-            @param sections: list of Sections that will be added to the ELF
-            @param load_addr: the virtual address at which the sections belonging to this segment
-                        will be loaded at
-            '''
-            self.sections = sections
-            
-            self.p_type = PT_LOAD
-            self.p_offset = self._get_p_offset()
-            self.p_vaddr = load_addr
-            self.p_paddr = self.p_vaddr # unspecifid contents by System V
-            self.p_filesz = self._get_p_filesz()
-            self.p_memsz = self.p_filesz # assuming no new bss
-            self.p_flags = self._union_section_flags()
-            self.p_align = 0x1000
+        self.phdrs['base'] = free_space_start
+        self.phdrs['max_num'] = free_space_size / self.elf.header.e_phentsize
         
-        
-        def _get_p_offset(self):
-            # find the minimum file offset of all the sections
-            p_offset = None
-            for section in self.sections:
-                if p_offset is None:
-                    p_offset = section.sh_offset
-                elif p_offset > section.sh_offset:
-                    p_offset = section.sh_offset
-            return p_offset
-        
-        def _get_p_filesz(self):
-            return sum(section.sh_size for section in self.sections)
-        
-        def _union_section_flags(self):
-            flags = PF_R
-            for section in self.sections:
-                if section.sh_flags & SHF_EXECINSTR:
-                    flags |= PF_X
-                elif section.sh_flags & SHF_WRITE:
-                    flags |= PF_W
-            return flags
-        
-        def dump_entry(self):
-            return struct.pack("<8i", 
-                               self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
-                               self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
-        
-    
+    def copy_phdrs(self):
+        # copy all the original program headers from the ELF file
+        for s in self.elf.iter_segments():
+            self.phdrs['entries'].append(Segment(s['p_type'], s['p_offset'], s['p_vaddr'], s['p_paddr'], s['p_filesz'],
+                              s['p_memsz'], s['p_flags'], s['p_align']))
             
     def add_section(self, contents):
         self.new_sections.append(self.Section(contents))
         
     def _add_segment(self, sections, load_addr):
         # add a segment that will contain all of the sections in 'sections'
-        self.new_segments.append(self.Segment(sections, load_addr))
+        #TODO: convert to use self.phdrs['entries']
+        self.phdrs['entries'].append(Segment(sections, load_addr))
+        
         
     
     def write_from_file(self, out_file, in_file):
@@ -151,6 +156,10 @@ class ELFManip:
         # copy the entire file first
         copy(self.filename, outfile)
         with open(outfile, "r+b") as f:
+            # we must (I strongly believe) add padding to cover all of the .bss section
+            #    or more generally the last section (if it is of type NOBITS)
+            self.padBss(f)
+            
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.new_sections:
@@ -160,7 +169,12 @@ class ELFManip:
                 #padding = section.sh_addralign - (current % section.sh_addralign)
                 padding = PAGESIZE - (current % PAGESIZE)
                 f.write("\x00"*padding)
+                
+                f.write("\x00" * PAGESIZE)
+                
                 section_offset = current + padding
+                
+                print "section offset: 0x%08x" % section_offset
                 
                 # append the secton contents
                 self.write_from_file(f, section.filename)
@@ -169,12 +183,16 @@ class ELFManip:
                 # update the offset and size fields in the section header entry
                 #section.sh_addr = self.image_base + section_offset
                 
-                section.sh_addr = 0x0804b000 # one page after bss
+                #TODO: determine this programatically as the next available page address
+                section.sh_addr = 0x08046000 
+                #section.sh_addr = 0x0804c000 # one page after bss
+                #section.sh_vaddr = self.offset_to_vaddr(section_offset)
                 section.sh_offset = section_offset
                 section.sh_size = section_end - section_offset
             
             
-            #self._add_segment(self.new_sections, 0x08047000)
+            self._add_segment(self.new_sections, 0x08046000)
+            #elf._add_segment(self.new_sections, 0x0804c000)
             
             # copy the section headers to the end of the file
             current = f.tell()
@@ -191,27 +209,24 @@ class ELFManip:
             
             
             # copy the program headers to the end of the file
-            ''' this is not possible. get the following error in the most basic case possible:
-                    Inconsistency detected by ld.so: rtld.c: 1290: dl_main: Assertion `_rtld_local._dl_rtld_map.l_libname' failed!
-                    
             current = f.tell()
-            #padding = PAGESIZE - (current % PAGESIZE)
             padding = 0x10 - (current % 0x10)
             
             f.write("\x00" * padding)
             new_ph_offset = f.tell()
+            
             program_headers = self.get_program_headers()
             f.write(program_headers)
-            '''
             
-            '''
+            
+            
             logger.info("Appending %d program header entries", len(self.new_sections))
             f.write(''.join(segment.dump_entry() for segment in self.new_segments))
-            '''
+            
             
             new_entry_point = self.elf.header.e_entry # use default entry point for now
             
-            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections), None, 0)
+            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections), new_ph_offset, len(self.new_segments))
             #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections) , None, len(self.new_segments))
             
             
@@ -221,20 +236,33 @@ class ELFManip:
             #f.seek(PH_START + 32*2 + 4*2)
             #f.write(struct.pack("<i", 0x08047000))
             
+            #TODO: wrap this into a funciton to update an arbitrary segment header entry
+            # PHDR entry:
+            # p_offset
+            f.seek(new_ph_offset + 32*0 + 4*1)
+            f.write(struct.pack("<i", new_ph_offset))
+            
+            # p_vaddr
+            f.seek(new_ph_offset + 32*0 + 4*2)
+            f.write(struct.pack("<i", self.image_base + new_ph_offset))
+            
+            
+            # first LOAD segment:
             # p_filsz
-            f.seek(PH_START + 32*2 + 4*4)
+            f.seek(new_ph_offset + 32*2 + 4*4)
             old_size = struct.unpack("<i", f.read(4))[0]
-            new_size = old_size + 0x3000
-            f.seek(PH_START + 32*2 + 4*4)
+            new_size = old_size + 0x4000 +  self.new_sections[0].sh_size
+            f.seek(new_ph_offset + 32*2 + 4*4)
             f.write(struct.pack("<i", new_size))
             
             # p_memsz
-            f.seek(PH_START + 32*2 + 4*5)
+            f.seek(new_ph_offset + 32*2 + 4*5)
             f.write(struct.pack("<i", new_size))
             
             
             # debugging bus error...
             # pad to 0x3000 then write the file again
+            
             f.seek(0, 2)
             current = f.tell()
             print hex(current)
@@ -245,6 +273,20 @@ class ELFManip:
             
             self.write_from_file(f, self.new_sections[0].filename)
             print hex(f.tell())
+    
+    
+    def offset_to_vaddr(self, offset):
+        # find the last section with attribute ALLOC
+        last_alloc_section = None
+        for section in self.elf.iter_sections():
+            if "A" in describe_sh_flags(section['sh_flags']):
+                if last_alloc_section is None:
+                    last_alloc_section = section
+                elif section['sh_addr'] > last_alloc_section['sh_addr']:
+                    last_alloc_section = section
+        
+        next_available_spot = last_alloc_section['sh_addr'] + last_alloc_section['sh_size']
+        
             
     
     def get_section_headers(self):
@@ -283,7 +325,99 @@ class ELFManip:
             f.seek(NUM_PH_OFFSET)
             f.write(struct.pack("<h", self.elf.header.e_phnum + num_new_ph))
         
+class Section(object):
+    def __init__(self, contents):#, name=None):
+        '''
+        @param contents: file containing section contents
+        '''
+        self.filename = contents
+        #if name is None:
+        #    name = '.' + self.filename
         
+        # elements with value None are defined when the section is written to the output file
+        self.sh_name = 0x1f # randomish name from the section header string table
+        self.sh_type = SHT_PROGBITS
+        self.sh_flags = SHF_ALLOC | SHF_EXECINSTR | SHF_WRITE
+        self.sh_addr = None
+        self.sh_offset = None
+        self.sh_size = None
+        self.sh_link = SHN_UNDEF
+        self.sh_info = 0
+        self.sh_addralign = 0x10
+        self.sh_entsize = 0
+    
+    def dump_entry(self):
+        return struct.pack("<10i", 
+                           self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
+                           self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
+                           self.sh_addralign, self.sh_entsize)
+        
+class Segment(object):
+    def __init__(self, p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align):
+        self.p_type = p_type
+        self.p_offset = p_offset
+        self.p_vaddr = p_vaddr
+        self.p_paddr = p_paddr # unspecified contents by System V
+        self.p_filesz = p_filesz
+        self.p_memsz = p_memsz
+        self.p_flags = p_flags
+        self.p_align = p_align
+
+class Custom_Segment(Segment):
+    def __init__(self, sections, load_addr):
+        ''' 
+        Just like a Segment except we need to do special things to make sure that the segments are mapped correctly
+        
+        @param sections: the sections that this segment will map into memory
+        @note: for now we are only accepting one section per segment.
+                    handling multiple sections should not be too hard or a feature to add
+        @param load_addr: the virtual address at which the section belonging to this segment
+                    will be loaded into
+        '''
+        self.sections = sections
+        assert len(self.sections) == 1
+        
+        super(self.__class__, self).__init__(PT_LOAD,
+                                             self._get_p_offset(),
+                                             load_addr,
+                                             load_addr,
+                                             self._get_p_filesz(),
+                                             self._get_p_filesz(), # assuming no new bss
+                                             self._union_section_flags(),
+                                             0x1000)
+    
+    
+    def _get_p_offset(self):
+        # find the minimum file offset of all the sections
+        p_offset = None
+        for section in self.sections:
+            if p_offset is None:
+                p_offset = section.sh_offset
+            elif p_offset > section.sh_offset:
+                p_offset = section.sh_offset
+        return p_offset
+    
+    def _get_p_filesz(self):
+        return sum(section.sh_size for section in self.sections)
+    
+    def _union_section_flags(self):
+        return PF_X | PF_W | PF_R
+        '''
+        flags = PF_R
+        for section in self.sections:
+            if section.sh_flags & SHF_EXECINSTR:
+                flags |= PF_X
+            if section.sh_flags & SHF_WRITE:
+                flags |= PF_W
+        return flags
+        '''
+    
+    def dump_entry(self):
+        return struct.pack("<8i", 
+                           self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
+                           self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
+        
+    
 def iter_chunks(file_object, block_size=1024):
     while True:
         data = file_object.read(block_size)
