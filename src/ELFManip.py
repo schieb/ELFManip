@@ -51,9 +51,6 @@ class ELFManip(object):
         self._f = open(self.filename, "rb")
         self.elf = ELFFile(self._f)
         
-        self.new_sections = []
-        #self.new_segments = [] # segment(s) to hold the new sections
-        
         self.image_base = self._get_image_base()
         logger.info("Image base: 0x%08x", self.image_base)
         if self.image_base != 0x08048000:
@@ -61,10 +58,15 @@ class ELFManip(object):
             exit()
         
         
+        self.custom_sections = []
+        #self.custom_segments = [] # segment(s) to hold the custom sections
+        
         self.phdrs = {'base': None, 'max_num': self.elf['e_phnum'], 'entries': []}
         self.relocate_phdrs()
-        
         self.copy_phdrs()
+        
+        self.shdrs = {'base': None, 'entries': []}
+        self.copy_shdrs()
         
         
     def _get_image_base(self):
@@ -115,8 +117,8 @@ class ELFManip(object):
             for b in padding_bytes:
                 assert b == "\x00"
                 
-        #TODO: check using a sound method (i.e., check that there is section located in these bytes, also section headers and program headers could
-        #        technically be located here
+        #TODO: check using a sound method (i.e., check that there is not a section located in these bytes, 
+        # also section headers and program headers could technically be located here
         # basically we need to check everything before we can say for sure that this space is unused
         
         self.phdrs['base'] = free_space_start
@@ -125,11 +127,18 @@ class ELFManip(object):
     def copy_phdrs(self):
         # copy all the original program headers from the ELF file
         for s in self.elf.iter_segments():
-            self.phdrs['entries'].append(Segment(s['p_type'], s['p_offset'], s['p_vaddr'], s['p_paddr'], s['p_filesz'],
-                              s['p_memsz'], s['p_flags'], s['p_align']))
+            self.phdrs['entries'].append(Segment(s['p_type'], s['p_offset'], s['p_vaddr'], s['p_paddr'],
+                                                 s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align']))
             
-    def add_section(self, contents):
-        self.new_sections.append(self.Section(contents))
+    def copy_shdrs(self):
+        # copy all the original section headers from the ELF file
+        for s in self.elf.iter_sections():
+            self.shdrs['entries'].append(Section(s['sh_entsize'], s['sh_name'], s['sh_type'], s['sh_flags'], 
+                                                 s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'], 
+                                                 s['sh_info'], s['sh_addralign'], s['sh_entsize']))
+    
+    def add_section(self, contents, **kwargs):
+        self.custom_sections.append(self.Custom_Section(contents, **kwargs))
         
     def _add_segment(self, sections, load_addr):
         # add a segment that will contain all of the sections in 'sections'
@@ -287,8 +296,6 @@ class ELFManip(object):
         
         next_available_spot = last_alloc_section['sh_addr'] + last_alloc_section['sh_size']
         
-            
-    
     def get_section_headers(self):
         sh_offset = self.elf.header.e_shoff
         num_entries = self.elf.header.e_shnum
@@ -324,34 +331,51 @@ class ELFManip(object):
             f.write(struct.pack("<i", new_ph_offset))
             f.seek(NUM_PH_OFFSET)
             f.write(struct.pack("<h", self.elf.header.e_phnum + num_new_ph))
-        
+
 class Section(object):
-    def __init__(self, contents):#, name=None):
-        '''
-        @param contents: file containing section contents
-        '''
+    def __init__(self, contents, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize):
         self.filename = contents
-        #if name is None:
-        #    name = '.' + self.filename
         
-        # elements with value None are defined when the section is written to the output file
-        self.sh_name = 0x1f # randomish name from the section header string table
-        self.sh_type = SHT_PROGBITS
-        self.sh_flags = SHF_ALLOC | SHF_EXECINSTR | SHF_WRITE
-        self.sh_addr = None
-        self.sh_offset = None
-        self.sh_size = None
-        self.sh_link = SHN_UNDEF
-        self.sh_info = 0
-        self.sh_addralign = 0x10
-        self.sh_entsize = 0
-    
+        self.sh_name = sh_name # randomish name from the section header string table
+        self.sh_type = sh_type
+        self.sh_flags = sh_flags
+        self.sh_addr = sh_addr
+        self.sh_offset = sh_offset
+        self.sh_size = sh_size
+        self.sh_link = sh_link
+        self.sh_info = sh_info
+        self.sh_addralign = sh_addralign
+        self.sh_entsize = sh_entsize
+        
+        
     def dump_entry(self):
         return struct.pack("<10i", 
                            self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                            self.sh_addralign, self.sh_entsize)
         
+        
+
+class Custom_Section(Section):
+    def __init__(self, contents, sh_type=SHT_PROGBITS, sh_flags=7, sh_addr=None):
+        '''
+        @param contents: file containing section contents
+        '''
+        super(self.__class__, self).__init__(contents,
+                                             0x1f,
+                                             sh_type,
+                                             sh_flags,
+                                             sh_addr,
+                                             None,
+                                             None,
+                                             SHN_UNDEF,
+                                             0,
+                                             0x10,
+                                             0)
+        
+    #TODO: class specific methods for custom section
+    
+
 class Segment(object):
     def __init__(self, p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align):
         self.p_type = p_type
@@ -362,6 +386,11 @@ class Segment(object):
         self.p_memsz = p_memsz
         self.p_flags = p_flags
         self.p_align = p_align
+        
+    def dump_entry(self):
+        return struct.pack("<8i", 
+                           self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
+                           self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
 
 class Custom_Segment(Segment):
     def __init__(self, sections, load_addr):
@@ -411,11 +440,6 @@ class Custom_Segment(Segment):
                 flags |= PF_W
         return flags
         '''
-    
-    def dump_entry(self):
-        return struct.pack("<8i", 
-                           self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
-                           self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
         
     
 def iter_chunks(file_object, block_size=1024):
