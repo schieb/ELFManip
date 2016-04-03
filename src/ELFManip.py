@@ -1,7 +1,8 @@
+#! /usr/bin/env python
+
 '''
 TODO:
     Must-dos:
-    - do what I did for segments to the sections
     - propogate rearchitecture to write_new_elf()
         - need more automation, less hard-coding during section writing and segment updating
         - move program headers into free space between segments (segment padding) if there is enough room
@@ -22,6 +23,7 @@ from elftools.elf.descriptions import describe_sh_flags
 
 import struct
 import os
+import sys
 from shutil import copy
 
 import logging
@@ -61,13 +63,12 @@ class ELFManip(object):
         self.custom_sections = []
         #self.custom_segments = [] # segment(s) to hold the custom sections
         
-        self.phdrs = {'base': None, 'max_num': self.elf['e_phnum'], 'entries': []}
+        self.phdrs = self._init_phdrs()
         self.relocate_phdrs()
-        self.copy_phdrs()
         
-        self.shdrs = {'base': None, 'entries': []}
-        self.copy_shdrs()
         
+        self.shdrs = self._init_shdrs()
+    
         
     def _get_image_base(self):
         base = None
@@ -78,6 +79,23 @@ class ELFManip(object):
                 elif base > segment.header.p_vaddr:
                     base = segment.header.p_vaddr
         return base
+    
+    def _init_phdrs(self):
+        phdrs = {'base': None, 'max_num': self.elf['e_phnum'], 'entries': []}
+        # copy all the original program headers from the ELF file
+        for s in self.elf.iter_segments():
+            phdrs['entries'].append(Segment(s['p_type'], s['p_offset'], s['p_vaddr'], s['p_paddr'],
+                                            s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align']))
+        return phdrs
+    
+    def _init_shdrs(self):
+        shdrs = {'base': None, 'entries': []}
+        # copy all the original section headers from the ELF file
+        for s in self.elf.iter_sections():
+            shdrs['entries'].append(Section(s['sh_entsize'], s['sh_name'], s['sh_type'], s['sh_flags'], 
+                                            s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'], 
+                                            s['sh_info'], s['sh_addralign'], s['sh_entsize']))
+        return shdrs
     
     def relocate_phdrs(self):
         # find the gap between 'AX' and 'WA' segments
@@ -123,19 +141,6 @@ class ELFManip(object):
         
         self.phdrs['base'] = free_space_start
         self.phdrs['max_num'] = free_space_size / self.elf.header.e_phentsize
-        
-    def copy_phdrs(self):
-        # copy all the original program headers from the ELF file
-        for s in self.elf.iter_segments():
-            self.phdrs['entries'].append(Segment(s['p_type'], s['p_offset'], s['p_vaddr'], s['p_paddr'],
-                                                 s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align']))
-            
-    def copy_shdrs(self):
-        # copy all the original section headers from the ELF file
-        for s in self.elf.iter_sections():
-            self.shdrs['entries'].append(Section(s['sh_entsize'], s['sh_name'], s['sh_type'], s['sh_flags'], 
-                                                 s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'], 
-                                                 s['sh_info'], s['sh_addralign'], s['sh_entsize']))
     
     def add_section(self, contents, **kwargs):
         self.custom_sections.append(self.Custom_Section(contents, **kwargs))
@@ -158,8 +163,8 @@ class ELFManip(object):
         if outfile == self.filename:
             logger.error("Must specify a different file destination than the original ELF")
             exit()
-        if len(self.new_sections) == 0:
-            logger.error("Not writing mew ELF - you must specify new sections to add first") 
+        if len(self.custom_sections) == 0:
+            logger.error("Not writing new ELF - you must specify at least one new section first") 
             return
         
         # copy the entire file first
@@ -167,11 +172,11 @@ class ELFManip(object):
         with open(outfile, "r+b") as f:
             # we must (I strongly believe) add padding to cover all of the .bss section
             #    or more generally the last section (if it is of type NOBITS)
-            self.padBss(f)
+            #self.padBss(f)
             
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
-            for section in self.new_sections:
+            for section in self.custom_sections:
                 current = f.tell()
                 
                 # pad to section alignment
@@ -200,8 +205,8 @@ class ELFManip(object):
                 section.sh_size = section_end - section_offset
             
             
-            self._add_segment(self.new_sections, 0x08046000)
-            #elf._add_segment(self.new_sections, 0x0804c000)
+            self._add_segment(self.custom_sections, 0x08046000)
+            #elf._add_segment(self.custom_sections, 0x0804c000)
             
             # copy the section headers to the end of the file
             current = f.tell()
@@ -212,8 +217,8 @@ class ELFManip(object):
             f.write(section_headers)
             
             
-            logger.info("Appending %d section header entries", len(self.new_sections))
-            f.write(''.join(section.dump_entry() for section in self.new_sections))
+            logger.info("Appending %d section header entries", len(self.custom_sections))
+            f.write(''.join(section.dump_entry() for section in self.custom_sections))
             
             
             
@@ -229,14 +234,14 @@ class ELFManip(object):
             
             
             
-            logger.info("Appending %d program header entries", len(self.new_sections))
+            logger.info("Appending %d program header entries", len(self.custom_sections))
             f.write(''.join(segment.dump_entry() for segment in self.new_segments))
             
             
             new_entry_point = self.elf.header.e_entry # use default entry point for now
             
-            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections), new_ph_offset, len(self.new_segments))
-            #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.new_sections) , None, len(self.new_segments))
+            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections), new_ph_offset, len(self.new_segments))
+            #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections) , None, len(self.new_segments))
             
             
             
@@ -260,7 +265,7 @@ class ELFManip(object):
             # p_filsz
             f.seek(new_ph_offset + 32*2 + 4*4)
             old_size = struct.unpack("<i", f.read(4))[0]
-            new_size = old_size + 0x4000 +  self.new_sections[0].sh_size
+            new_size = old_size + 0x4000 +  self.custom_sections[0].sh_size
             f.seek(new_ph_offset + 32*2 + 4*4)
             f.write(struct.pack("<i", new_size))
             
@@ -280,7 +285,7 @@ class ELFManip(object):
             f.write("\x00" * padding)
             print hex(f.tell())
             
-            self.write_from_file(f, self.new_sections[0].filename)
+            self.write_from_file(f, self.custom_sections[0].filename)
             print hex(f.tell())
     
     
@@ -449,3 +454,15 @@ def iter_chunks(file_object, block_size=1024):
             yield None
         yield data
         
+        
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print "Usage: %s [ELF file] [hash table file]" % sys.argv[0]
+        exit()
+    
+    elf_filename = sys.argv[1]
+    elf = ELFManip(elf_filename)
+    
+    elf.write_new_elf(elf.filename + ".new")
+    
+    
