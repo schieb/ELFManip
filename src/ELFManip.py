@@ -61,7 +61,7 @@ class ELFManip(object):
         
         
         self.custom_sections = []
-        #self.custom_segments = [] # segment(s) to hold the custom sections
+        self.custom_segments = [] # segment(s) to hold the custom sections
         
         self.phdrs = self._init_phdrs()
         self.relocate_phdrs()
@@ -142,13 +142,21 @@ class ELFManip(object):
         self.phdrs['base'] = free_space_start
         self.phdrs['max_num'] = free_space_size / self.elf.header.e_phentsize
     
-    def add_section(self, contents, **kwargs):
-        self.custom_sections.append(self.Custom_Section(contents, **kwargs))
+    def add_section(self, section_contents, **kwargs):
+        ''' Add a section to the ELF file with contents of section_contents
+            A segment will automatically be created for each added section
+            
+            @param section_contents: filename holding the contents of the section
+            @param kwargs: optional custom section properties as defined in the ELF spec
         
-    def _add_segment(self, sections, load_addr):
+        '''
+        self.custom_sections.append(Custom_Section(section_contents, **kwargs))
+        self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
+        
+    def _add_segment(self, section, load_addr):
         # add a segment that will contain all of the sections in 'sections'
         #TODO: convert to use self.phdrs['entries']
-        self.phdrs['entries'].append(Segment(sections, load_addr))
+        self.phdrs['entries'].append(Custom_Segment([section], load_addr))
         
         
     
@@ -235,13 +243,13 @@ class ELFManip(object):
             
             
             logger.info("Appending %d program header entries", len(self.custom_sections))
-            f.write(''.join(segment.dump_entry() for segment in self.new_segments))
+            f.write(''.join(segment.dump_entry() for segment in self.custom_segments))
             
             
             new_entry_point = self.elf.header.e_entry # use default entry point for now
             
-            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections), new_ph_offset, len(self.new_segments))
-            #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections) , None, len(self.new_segments))
+            self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections), new_ph_offset, len(self.custom_segments))
+            #self.patch_elf_header(f, new_entry_point, new_sh_offset, len(self.custom_sections) , None, len(self.custom_segments))
             
             
             
@@ -359,6 +367,11 @@ class Section(object):
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                            self.sh_addralign, self.sh_entsize)
         
+    def describe_section(self):
+                (self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
+                 self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
+                 self.sh_addralign, self.sh_entsize)
+        
         
 
 class Custom_Section(Section):
@@ -377,6 +390,8 @@ class Custom_Section(Section):
                                              0,
                                              0x10,
                                              0)
+        
+        self.describe_section()
         
     #TODO: class specific methods for custom section
     
@@ -409,7 +424,8 @@ class Custom_Segment(Segment):
                     will be loaded into
         '''
         self.sections = sections
-        assert len(self.sections) == 1
+        assert len(sections) == 1
+        assert isinstance(sections[0], Section)
         
         super(self.__class__, self).__init__(PT_LOAD,
                                              self._get_p_offset(),
@@ -456,12 +472,17 @@ def iter_chunks(file_object, block_size=1024):
         
         
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print "Usage: %s [ELF file] [hash table file]" % sys.argv[0]
+    if len(sys.argv) != 4:
+        print "Usage: %s [ELF file] [new section contents] [hexadecimal vma of new section]" % sys.argv[0]
         exit()
     
     elf_filename = sys.argv[1]
+    section_contents = sys.argv[2]
+    section_vma = sys.argv[3]
+    
     elf = ELFManip(elf_filename)
+    
+    elf.add_section(section_contents, sh_addr = int(section_vma, 16))
     
     elf.write_new_elf(elf.filename + ".new")
     
