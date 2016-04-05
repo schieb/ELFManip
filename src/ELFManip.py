@@ -16,7 +16,12 @@ TODO:
 '''
  
  
-from Constants import *
+from Constants import (SHF_WRITE,
+                       SHN_UNDEF,
+                       SHT_PROGBITS,
+                       PF_X, PF_W, PF_R,
+                       PT_LOAD,
+                       )
 
 from elftools.elf.elffile import ELFFile
 from elftools.elf.descriptions import describe_sh_flags
