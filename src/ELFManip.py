@@ -92,7 +92,7 @@ class ELFManip(object):
         shdrs = {'base': None, 'entries': []}
         # copy all the original section headers from the ELF file
         for s in self.elf.iter_sections():
-            shdrs['entries'].append(Section(s['sh_entsize'], s['sh_name'], s['sh_type'], s['sh_flags'], 
+            shdrs['entries'].append(Section(s['sh_name'], s['sh_type'], s['sh_flags'], 
                                             s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'], 
                                             s['sh_info'], s['sh_addralign'], s['sh_entsize']))
         return shdrs
@@ -150,17 +150,25 @@ class ELFManip(object):
             @param kwargs: optional custom section properties as defined in the ELF spec
         
         '''
+        # initialize the section and save it in custom_sections
         self.custom_sections.append(Custom_Section(section_contents, **kwargs))
+        # do the same with its corresponding segment
         self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
         
     def _add_segment(self, section, load_addr):
         # add a segment that will contain all of the sections in 'sections'
         #TODO: convert to use self.phdrs['entries']
-        self.phdrs['entries'].append(Custom_Segment([section], load_addr))
+        new_segment = Custom_Segment([section], load_addr)
+        self.phdrs['entries'].append(new_segment)
         
         
     
     def write_from_file(self, out_file, in_file):
+        ''' Writes in_file to the current file offset of out_file
+            
+            @param out_file: output file
+            @param in_file: input file
+        '''
         with open(in_file, "rb") as in_f:
             for chunk in iter_chunks(in_f):
                 if chunk is None:
@@ -175,28 +183,39 @@ class ELFManip(object):
             logger.error("Not writing new ELF - you must specify at least one new section first") 
             return
         
+        logger.info("Writing new ELF: %s", outfile)
         # copy the entire file first
         copy(self.filename, outfile)
         with open(outfile, "r+b") as f:
-            # we must (I strongly believe) add padding to cover all of the .bss section
+            # we must (I strongly believe) add padding_len to cover all of the .bss section
             #    or more generally the last section (if it is of type NOBITS)
             #self.padBss(f)
             
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.custom_sections:
+                if len(self.custom_sections) != 1:
+                    # only handling one section for now
+                    logger.error("too many custom sections - you supplied %d custom sections", len(self.custom_sections))
+                    exit()
+                
                 current = f.tell()
                 
                 # pad to section alignment
-                #padding = section.sh_addralign - (current % section.sh_addralign)
-                padding = PAGESIZE - (current % PAGESIZE)
-                f.write("\x00"*padding)
+                #padding_len = section.sh_addralign - (current % section.sh_addralign)
+                padding_len = PAGESIZE - (current % PAGESIZE)
+                logger.debug("padding EOF with %d null bytes", padding_len)
+                f.write("\x00" * padding_len)
                 
+                # add extra page worth of padding (hardcoded to handle small bss for now)
+                #TODO: test with this PAGESIZE padding removed later
+                logger.debug("padding EOF with additional 0x%x null bytes", PAGESIZE)
                 f.write("\x00" * PAGESIZE)
                 
-                section_offset = current + padding
+                section_offset = f.tell()
                 
-                print "section offset: 0x%08x" % section_offset
+                logger.debug("section offset for '%s': 0x%08x", section.filename, section_offset)
+                exit()
                 
                 # append the secton contents
                 self.write_from_file(f, section.filename)
@@ -213,13 +232,20 @@ class ELFManip(object):
                 section.sh_size = section_end - section_offset
             
             
-            self._add_segment(self.custom_sections, 0x08046000)
+            # we are adding the segment every time a custom section is added
+            #self._add_segment(self.custom_sections, 0x08046000)
             #elf._add_segment(self.custom_sections, 0x0804c000)
             
-            # copy the section headers to the end of the file
+            
+            logger.error("start here")
+            exit()
+            
+            #TODO: make the function write_section_headers() that writes both normal and custom section header entries
+            #        also remove get_section_headers() and use self.sections instead
+            # copy the section headers to the current file offset (end of the file)
             current = f.tell()
-            padding = 0x10 - (current % 0x10)
-            f.write("\x00" * padding)
+            padding_len = 0x10 - (current % 0x10)
+            f.write("\x00" * padding_len)
             new_sh_offset = f.tell()
             section_headers = self.get_section_headers()
             f.write(section_headers)
@@ -232,9 +258,9 @@ class ELFManip(object):
             
             # copy the program headers to the end of the file
             current = f.tell()
-            padding = 0x10 - (current % 0x10)
+            padding_len = 0x10 - (current % 0x10)
             
-            f.write("\x00" * padding)
+            f.write("\x00" * padding_len)
             new_ph_offset = f.tell()
             
             program_headers = self.get_program_headers()
@@ -289,8 +315,8 @@ class ELFManip(object):
             current = f.tell()
             print hex(current)
             
-            padding = 0x3000 - current
-            f.write("\x00" * padding)
+            padding_len = 0x3000 - current
+            f.write("\x00" * padding_len)
             print hex(f.tell())
             
             self.write_from_file(f, self.custom_sections[0].filename)
@@ -308,6 +334,7 @@ class ELFManip(object):
                     last_alloc_section = section
         
         next_available_spot = last_alloc_section['sh_addr'] + last_alloc_section['sh_size']
+        #TODO: finish this function
         
     def get_section_headers(self):
         sh_offset = self.elf.header.e_shoff
@@ -346,8 +373,12 @@ class ELFManip(object):
             f.write(struct.pack("<h", self.elf.header.e_phnum + num_new_ph))
 
 class Section(object):
-    def __init__(self, contents, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize):
-        self.filename = contents
+    ''' The basic section class.
+        This class is only to be used to copy the section headers from the original ELF file
+        
+        User-defined sections must be instanciated via the Custom_Section class
+    '''
+    def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize):
         
         self.sh_name = sh_name # randomish name from the section header string table
         self.sh_type = sh_type
@@ -360,14 +391,24 @@ class Section(object):
         self.sh_addralign = sh_addralign
         self.sh_entsize = sh_entsize
         
+    
+    def get_next_offset(self):
+        ''' Determines the file offset at which this section will be placed in the ELF 
+        '''
+        pass
+        
         
     def dump_entry(self):
+        if self.sh_offset is None:
+            print "section backed by file '%s' does not have an ELF offset assigned" % self.filename
+            exit()
         return struct.pack("<10i", 
                            self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                            self.sh_addralign, self.sh_entsize)
         
     def describe_section(self):
+        print "Name: 0x%x, Type: %s, Flags: %s, Addr: 0x%08x, Offset: %s, Size: %s bytes, Link: %s, Info: %s, Align: %d, EntSz: %d" % \
                 (self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
                  self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                  self.sh_addralign, self.sh_entsize)
@@ -375,12 +416,14 @@ class Section(object):
         
 
 class Custom_Section(Section):
-    def __init__(self, contents, sh_type=SHT_PROGBITS, sh_flags=7, sh_addr=None):
+    ''' 
+    
+    '''
+    def __init__(self, contents, sh_type=SHT_PROGBITS, sh_flags=PF_X | PF_W | PF_R, sh_addr=None):
         '''
         @param contents: file containing section contents
         '''
-        super(self.__class__, self).__init__(contents,
-                                             0x1f,
+        super(self.__class__, self).__init__(0x1f,
                                              sh_type,
                                              sh_flags,
                                              sh_addr,
@@ -390,10 +433,21 @@ class Custom_Section(Section):
                                              0,
                                              0x10,
                                              0)
+        self.filename = contents
         
+        self._update_size()
+        
+        print "Created custom section from file '%s'" % self.filename
         self.describe_section()
         
-    #TODO: class specific methods for custom section
+    
+    def _update_size(self):
+        ''' Set the size of the section to match the size of the file that is backing the section
+        '''
+        if self.sh_size is None or self.sh_size == 0:
+            print self.filename
+            self.sh_size = os.path.getsize(self.filename)
+        
     
 
 class Segment(object):
@@ -424,8 +478,12 @@ class Custom_Segment(Segment):
                     will be loaded into
         '''
         self.sections = sections
-        assert len(sections) == 1
-        assert isinstance(sections[0], Section)
+        assert len(self.sections) == 1
+        print self.sections
+        print self.sections[0]
+        print type(self.sections[0])
+        
+        assert isinstance(self.sections[0], Custom_Section)
         
         super(self.__class__, self).__init__(PT_LOAD,
                                              self._get_p_offset(),
@@ -469,21 +527,5 @@ def iter_chunks(file_object, block_size=1024):
         if not data:
             yield None
         yield data
-        
-        
-if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print "Usage: %s [ELF file] [new section contents] [hexadecimal vma of new section]" % sys.argv[0]
-        exit()
-    
-    elf_filename = sys.argv[1]
-    section_contents = sys.argv[2]
-    section_vma = sys.argv[3]
-    
-    elf = ELFManip(elf_filename)
-    
-    elf.add_section(section_contents, sh_addr = int(section_vma, 16))
-    
-    elf.write_new_elf(elf.filename + ".new")
-    
-    
+
+
