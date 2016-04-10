@@ -74,7 +74,7 @@ class ELFManip(object):
         self.phdrs = self._init_phdrs()
         self.relocate_phdrs()
         
-    
+        self.new_entry_point = None
     
     
     def _get_image_base(self):
@@ -242,10 +242,12 @@ class ELFManip(object):
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.custom_sections:
+                '''
                 if len(self.custom_sections) != 1:
                     # only handling one section for now
                     logger.error("too many custom sections - you supplied %d custom sections", len(self.custom_sections))
                     exit()
+                '''
                 
                 current = f.tell()
                 
@@ -308,9 +310,8 @@ class ELFManip(object):
             f.write(''.join(segment.dump_entry() for segment in self.custom_segments))
             '''
             
-            new_entry_point = self.elf.header.e_entry # use default entry point for now
             
-            self.patch_elf_header(f, new_entry_point, new_sh_offset, self.phdrs['base'])
+            self.patch_elf_header(f, new_sh_offset, self.phdrs['base'])
             
             print "finished writing ELF"
             exit()
@@ -397,10 +398,13 @@ class ELFManip(object):
             
         return program_headers
     
-    def patch_elf_header(self, f, new_entry_point, new_sh_offset, new_ph_offset):
-        #with open(filename, "r+b")
-        f.seek(EP_OFFSET)
-        f.write(struct.pack("<i", new_entry_point))
+    def set_entry_point(self, entry_point):
+        self.new_entry_point = entry_point
+    
+    def patch_elf_header(self, f, new_sh_offset, new_ph_offset):
+        if self.new_entry_point is not None:
+            f.seek(EP_OFFSET)
+            f.write(struct.pack("<i", self.new_entry_point))
         
         f.seek(SH_OFFSET)
         f.write(struct.pack("<i", new_sh_offset))
