@@ -120,7 +120,14 @@ class ELFManip(object):
                 break
             else:
                 section_before_padding = section
-                
+        
+        if section_before_padding is None:
+            logger.error("Cannot relocate the program headers. ELF file has no sections!")
+            exit()
+        elif section_after_padding is None:
+            logger.error("Cannot relocate the program headers. ELF file has no writable section")
+            exit()
+            
         logger.debug("Sections on either side of the segment padding: [%s, %s]", section_before_padding.name, section_after_padding.name)
         
         free_space_start = section_before_padding['sh_offset'] + section_before_padding['sh_size']
