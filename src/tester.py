@@ -19,12 +19,15 @@ if __name__ == "__main__":
     elf = ELFManip(elf_filename)
     
     
-    hash_table_section = "/mnt/hgfs/GitHub/Delinker/tests/hash_table"
-    new_RX_section = "/mnt/hgfs/GitHub/Delinker/tests/RX_new"
+    #hash_table_section = "/mnt/hgfs/GitHub/Delinker/tests/hash_table"
+    #new_RX_section = "/mnt/hgfs/GitHub/Delinker/tests/RX_new"
+    
+    hash_table_section = "/mnt/hgfs/GitHub/Delinker/src/hash_table"
+    new_RX_section = "/mnt/hgfs/GitHub/Delinker/src/RX_new"
     
     elf.add_section(hash_table_section, sh_addr = HASH_TABLE_BASE)
     elf.add_section(new_RX_section, sh_addr = NEW_TEXT_BASE)
-    elf.set_entry_point(NEW_TEXT_BASE)
+    #elf.set_entry_point(0x090753a2) # gcc::_start()
     
     elf.write_new_elf(elf.filename + ".new")
     
