@@ -159,14 +159,16 @@ class ELFManip(object):
             
             for idx, segment in enumerate(self.elf.iter_segments()):
                 if describe_p_type(segment['p_type']) == "GNU_STACK":
+                    # keep the old base and max number of entries
+                    self.phdrs['base'] = self.elf.header['e_phoff']
+                    self.phdrs['max_num'] = len(self.phdrs['entries'])
                     # remove this entry, freeing up room for one user defined entry
+                    logger.debug("removing GNU_STACK pdhr entry")
                     del self.phdrs['entries'][idx]
+                    
                     #assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
                     logger.info("should have room to add one section/segment")
-                    self.phdrs['max_num'] = len(self.phdrs['entries'])
                     break
-        
-        
         
     def _update_phdr_entry(self, location, max_size):
         ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
