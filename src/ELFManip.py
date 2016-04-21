@@ -195,10 +195,14 @@ class ELFManip(object):
             @param kwargs: optional custom section properties as defined in the ELF spec
         
         '''
-        # initialize the section and save it in custom_sections
-        self.custom_sections.append(Custom_Section(section_contents, **kwargs))
-        # do the same with its corresponding segment
-        self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
+        # check that there is enough room to add the segment that will end up mapping this new section
+        if len(self.phdrs['entries']) < self.phdrs['max_num']:
+            # initialize the section and save it in custom_sections
+            self.custom_sections.append(Custom_Section(section_contents, **kwargs))
+            # do the same with its corresponding segment
+            self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
+        else:
+            logger.error("Cannot add another section. Not enough room in the program headers to add another segment")
         
     def _add_segment(self, section, load_addr):
         # add a segment that will contain all of the sections in 'sections'
