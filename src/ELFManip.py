@@ -107,6 +107,9 @@ class ELFManip(object):
         return shdrs
     
     def relocate_phdrs(self):
+        ''' Attempts to find a new location for the program headers to reside in the ELF image
+        
+        '''
         #TODO: rename this function
         # find the gap between 'AX' and 'WA' segments
         logger.debug("Looking for sufficient padding between LOAD segments to relocate the PHDRs to")
@@ -140,27 +143,32 @@ class ELFManip(object):
         minimum_required_space = (self.elf.header.e_phnum + 1) * self.elf.header.e_phentsize
         if free_space_size >= minimum_required_space:
             logger.debug("Found enough space to move the program headers!")
+            
+            # ensure that this space is actually empty
+            with open(self.filename) as f:
+                f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
+                padding_bytes = f.read(free_space_size)
+                for b in padding_bytes:
+                    assert b == "\x00"
         else:
             logger.error("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
                         " or moving the .interp section and removing the .note.* sections")
             exit()
             
-        # ensure that this space is actually empty
-        with open(self.filename) as f:
-            f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
-            padding_bytes = f.read(free_space_size)
-            for b in padding_bytes:
-                assert b == "\x00"
-                
-        #TODO: check using a sound method (i.e., check that there is not a section located in these bytes, 
-        # also section headers and program headers could technically be located here
-        # basically we need to check everything before we can say for sure that this space is unused
         
-        self.phdrs['base'] = free_space_start
-        self.phdrs['max_num'] = free_space_size / self.elf.header.e_phentsize
+        self._update_phdr_entry(free_space_start, free_space_size)
+        
+    def _update_phdr_entry(self, location, max_size):
+        ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
+            @param location: offset at which the program headers will be located
+        '''
+        
+        self.phdrs['base'] = location
+        self.phdrs['max_num'] = max_size / self.elf.header.e_phentsize
         
         # update the offset in the PHDR segment entry
         for p in self.phdrs['entries']:
+            # Note: shared objects have no phdr entry in segment headers
             if p.p_type == PT_PHDR:
                 logger.debug("Updating the PHDR segment to new offset: 0x%x", self.phdrs['base'])
                 p.p_offset = self.phdrs['base']
