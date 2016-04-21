@@ -25,7 +25,7 @@ from Constants import (SHF_WRITE,
                        )
 
 from elftools.elf.elffile import ELFFile
-from elftools.elf.descriptions import describe_sh_flags
+from elftools.elf.descriptions import describe_sh_flags, describe_p_type
 from elftools.elf.enums import ENUM_SH_TYPE, ENUM_P_TYPE
 
 import struct
@@ -150,13 +150,23 @@ class ELFManip(object):
                 padding_bytes = f.read(free_space_size)
                 for b in padding_bytes:
                     assert b == "\x00"
+            self._update_phdr_entry(free_space_start, free_space_size)
+            
         else:
             logger.error("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
                         " or moving the .interp section and removing the .note.* sections")
-            exit()
+            logger.warn("Temporary hack to give you ability to add *one* section (which will be mapped by one segment).")
             
+            for idx, segment in enumerate(self.elf.iter_segments()):
+                if describe_p_type(segment['p_type']) == "GNU_STACK":
+                    # remove this entry, freeing up room for one user defined entry
+                    del self.phdrs['entries'][idx]
+                    #assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
+                    logger.info("should have room to add one section/segment")
+                    self.phdrs['max_num'] = len(self.phdrs['entries'])
+                    break
         
-        self._update_phdr_entry(free_space_start, free_space_size)
+        
         
     def _update_phdr_entry(self, location, max_size):
         ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
