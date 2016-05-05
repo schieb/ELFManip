@@ -6,29 +6,36 @@
 
 import sys
 from ELFManip import ELFManip
-from Mappin import HASH_TABLE_BASE, NEW_TEXT_BASE 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        #print "Usage: %s [ELF file] [new section contents] [hexadecimal vma of new section]" % sys.argv[0]
-        print "Usage: %s [ELF file]" % sys.argv[0]
+    if len(sys.argv) < 2:
+        print "Usage: %s [file1] ([file2] ... [filen])" % sys.argv[0]
         exit()
     
-    elf_filename = sys.argv[1]
-    
-    elf = ELFManip(elf_filename)
-    
-    
-    #hash_table_section = "/mnt/hgfs/GitHub/Delinker/tests/hash_table"
-    #new_RX_section = "/mnt/hgfs/GitHub/Delinker/tests/RX_new"
-    
-    hash_table_section = "/mnt/hgfs/GitHub/Delinker/src/hash_table"
-    new_RX_section = "/mnt/hgfs/GitHub/Delinker/src/RX_new"
-    
-    elf.add_section(hash_table_section, sh_addr = HASH_TABLE_BASE)
-    elf.add_section(new_RX_section, sh_addr = NEW_TEXT_BASE)
-    #elf.set_entry_point(0x090753a2) # gcc::_start()
-    
-    elf.write_new_elf(elf.filename + ".new")
+    for elf_filename in sys.argv[1:]:
+        print "working on %s" % elf_filename
+        elf = ELFManip(elf_filename)
+        
+        
+        #hash_table_section = "/mnt/hgfs/GitHub/Delinker/tests/hash_table"
+        #new_RX_section = "/mnt/hgfs/GitHub/Delinker/tests/RX_new"
+        
+        section1 = "./test_segment"
+        section2 = "./test_segment"
+        
+        section1_addr = 0x09000000;
+        section2_addr = 0x07000000;
+        
+        section = elf.add_section(section1, sh_addr = section1_addr)
+        if section is None:
+            print "section add failure"
+            exit()
+        section = elf.add_section(section2, sh_addr = section2_addr)
+        if section is None:
+            print "section add failure"
+            exit()
+        #elf.set_entry_point(0x090753a2) # gcc::_start()
+        
+        elf.write_new_elf(elf.filename + ".new")
     
     
