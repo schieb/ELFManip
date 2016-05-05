@@ -216,6 +216,7 @@ class ELFManip(object):
             
             @param section_contents: filename holding the contents of the section
             @param kwargs: optional custom section properties as defined in the ELF spec
+            @return: Custom_Section object or None on failure
         
         '''
         # check that there is enough room to add the segment that will end up mapping this new section
@@ -226,6 +227,8 @@ class ELFManip(object):
             self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
         else:
             logger.error("Cannot add another section. Not enough room in the program headers to add another segment")
+            return None
+        return self.custom_sections[-1]
         
     def _add_segment(self, section, load_addr):
         # add a segment that will contain all of the sections in 'sections'
@@ -355,7 +358,6 @@ class ELFManip(object):
             self.patch_elf_header(f, new_sh_offset, self.phdrs['base'])
             
             print "finished writing ELF"
-            exit()
             
             
             
