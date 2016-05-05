@@ -5,7 +5,6 @@ TODO:
     Must-dos:
     - propogate rearchitecture to write_new_elf()
         - need more automation, less hard-coding during section writing and segment updating
-        - move program headers into free space between segments (segment padding) if there is enough room
     - add method to move program headers into the .note.* sections (and move .interp)
     
     Features:
@@ -67,7 +66,6 @@ class ELFManip(object):
         
         
         self.custom_sections = []
-        self.custom_segments = [] # segment(s) to hold the custom sections
         
         self.shdrs = self._init_shdrs()
         
@@ -170,12 +168,13 @@ class ELFManip(object):
                     logger.info("should have room to add one section/segment")
                     break
         
-    def _update_phdr_entry(self, location, max_size):
+    def _update_phdr_entry(self, new_base, max_size):
         ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
-            @param location: offset at which the program headers will be located
+            @param new_base: offset at which the program headers will be located
+            @param max_size: maximum size in bytes that the new program headers can grow to
         '''
         
-        self.phdrs['base'] = location
+        self.phdrs['base'] = new_base
         self.phdrs['max_num'] = max_size / self.elf.header.e_phentsize
         
         # update the offset in the PHDR segment entry
@@ -186,18 +185,30 @@ class ELFManip(object):
                 p.p_offset = self.phdrs['base']
                 p.p_vaddr = self.image_base + p.p_offset
                 p.p_paddr = self.image_base + p.p_offset
-                p.p_filesz = (len(self.phdrs['entries']) + len(self.custom_segments)) * 32 # 32 bytes each
+                p.p_filesz = len(self.phdrs['entries']) * 32 # 32 bytes each
                 p.p_memsz = p.p_filesz
-        #TODO: to be a general solution, we should expand the immediately following LOAD segment size so that it includes the program headers
-        #        otherwise, it only happens to load since it is likely within the page that the first LOAD segment defines
-        #        won't necessarily be the case though...
+        
+        # expand the size of the LOAD segment that contains the enlarged program headers
+        # this might be necessary if the phdrs span two pages - *untested*
+        found = False
+        for segment in self.phdrs['entries']:
+            if segment.p_type != PT_LOAD:
+                continue
+            if segment.p_offset + segment.p_filesz == new_base:
+                found = True
+                segment.p_filesz += len(self.get_ph_table())
+                segment.p_memsz  = segment.p_filesz
+                break
+                
+        if not found:
+            logger.error("problem finding LOAD segment containing new phdr location")
+            exit()
         
         
     def write_phdrs(self, outfile):
         outfile.seek(self.phdrs['base'])
         logger.debug("Writing program headers to offset 0x%x", outfile.tell())
         outfile.write(self.get_ph_table())
-        
     
     def add_section(self, section_contents, **kwargs):
         ''' Add a section to the ELF file with contents of section_contents
@@ -234,8 +245,7 @@ class ELFManip(object):
         ''' Get the program header table which includes all of the original program header entries
             plus all of the entries for the custom segments
         '''
-        return ''.join(p.dump_entry() for p in self.phdrs['entries']) + \
-               ''.join(p.dump_entry() for p in self.custom_segments)
+        return ''.join(p.dump_entry() for p in self.phdrs['entries'])
     
     def set_section_offset(self, section, offset):
         section.sh_offset = offset
@@ -446,7 +456,7 @@ class ELFManip(object):
             f.seek(PH_OFFSET)
             f.write(struct.pack("<i", new_ph_offset))
             f.seek(NUM_PH_OFFSET)
-            f.write(struct.pack("<h", len(self.phdrs['entries']) + len(self.custom_segments)))
+            f.write(struct.pack("<h", len(self.phdrs['entries'])))
 
 class Section(object):
     ''' The basic section class.
