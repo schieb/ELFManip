@@ -49,6 +49,11 @@ PH_START        = 52
 
 PAGESIZE = 0x1000
 
+class BadELF(RuntimeError):
+    ''' raised when the ELF cannot be processed by ELFManip 
+        e.g., unexpected section/segment layout, missing sections/segments
+    '''
+
 class ELFManip(object):
     def __init__(self, in_file):
         '''
@@ -62,7 +67,7 @@ class ELFManip(object):
         logger.info("Image base: 0x%08x", self.image_base)
         if self.image_base != 0x08048000:
             logger.error("strange image base 0x%08x. Need to check that no code assumes 0x08048000 as the base", self.image_base)
-            exit()
+            raise BadELF('bad image base')
         
         
         self.custom_sections = []
@@ -123,11 +128,11 @@ class ELFManip(object):
                 section_before_padding = section
         
         if section_before_padding is None:
-            logger.error("Cannot relocate the program headers. ELF file has no sections!")
-            exit()
+            logger.error("Cannot relocate the program headers.")
+            raise BadELF("ELF has no sections")
         elif section_after_padding is None:
-            logger.error("Cannot relocate the program headers. ELF file has no writable section")
-            exit()
+            logger.error("Cannot relocate the program headers.")
+            raise BadELF("ELF has no ELF file has no writable section")
             
         logger.debug("Sections on either side of the segment padding: [%s, %s]", section_before_padding.name, section_after_padding.name)
         
@@ -142,16 +147,22 @@ class ELFManip(object):
         if free_space_size >= minimum_required_space:
             logger.debug("Found enough space to move the program headers!")
             
-            # ensure that this space is actually empty
+            # check that this space is actually empty
+            empty = True
             with open(self.filename) as f:
                 f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
                 padding_bytes = f.read(free_space_size)
                 for b in padding_bytes:
-                    assert b == "\x00"
+                    if b != "\x00":
+                        empty = False
+                if not empty:
+                    # not sure why this would ever happen in a legitimate binary
+                    logger.warn("Padding is not empty... repurposing anyways")
+                    
             self._update_phdr_entry(free_space_start, free_space_size)
             
         else:
-            logger.error("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
+            logger.warn("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
                         " or moving the .interp section and removing the .note.* sections")
             logger.warn("Temporary hack to give you ability to add *one* section (which will be mapped by one segment).")
             
@@ -189,7 +200,7 @@ class ELFManip(object):
                 p.p_memsz = p.p_filesz
         
         # expand the size of the LOAD segment that contains the enlarged program headers
-        # this might be necessary if the phdrs span two pages - *untested*
+        # otherwise, the page may not get mapped into memory
         found = False
         for segment in self.phdrs['entries']:
             if segment.p_type != PT_LOAD:
@@ -202,7 +213,7 @@ class ELFManip(object):
                 
         if not found:
             logger.error("problem finding LOAD segment containing new phdr location")
-            exit()
+            raise BadELF("can't find LOAD segment")
         
         
     def write_phdrs(self, outfile):
@@ -270,7 +281,7 @@ class ELFManip(object):
     def write_new_elf(self, outfile):
         if outfile == self.filename:
             logger.error("Must specify a different file destination than the original ELF")
-            exit()
+            return
         if len(self.custom_sections) == 0:
             logger.error("Not writing new ELF - you must specify at least one new section first") 
             return
@@ -286,12 +297,6 @@ class ELFManip(object):
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.custom_sections:
-                '''
-                if len(self.custom_sections) != 1:
-                    # only handling one section for now
-                    logger.error("too many custom sections - you supplied %d custom sections", len(self.custom_sections))
-                    exit()
-                '''
                 
                 current = f.tell()
                 
@@ -489,9 +494,6 @@ class Section(object):
         
         
     def dump_entry(self):
-        if self.sh_offset is None:
-            print "section backed by file '%s' does not have an ELF offset assigned" % self.filename
-            exit()
         return struct.pack("<10i", 
                            self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
