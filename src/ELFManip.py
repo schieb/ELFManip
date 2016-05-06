@@ -286,14 +286,10 @@ class ELFManip(object):
                 #        basically I am attempting to play it safe
                 
                 # pad to section alignment
-                current = f.tell()
-                padding_len = PAGESIZE - (current % PAGESIZE)
-                logger.debug("padding EOF with %d null bytes", padding_len)
-                f.write("\x00" * padding_len)
+                pad_to_modulus(f, PAGESIZE)
                 
                 # add extra page worth of padding
-                logger.debug("padding EOF with additional 0x%x null bytes", PAGESIZE)
-                f.write("\x00" * PAGESIZE)
+                pad_to_modulus(f, PAGESIZE, pad_if_aligned=True)
                 
                 section_offset = f.tell()
                 
@@ -308,10 +304,7 @@ class ELFManip(object):
             
             
             # copy the section headers to the current file offset (end of the file)
-            current = f.tell()
-            padding_len = 0x10 - (current % 0x10)
-            logger.debug("Adding %d bytes of padding before the section headers", padding_len)
-            f.write("\x00" * padding_len)
+            pad_to_modulus(f, 0x10)
             
             new_sh_offset = f.tell()
             
@@ -515,6 +508,25 @@ class Custom_Segment(Segment):
                 flags |= PF_W
         return flags
         '''
+
+def pad_to_modulus(f, modulus, padding_bytes='\x00', pad_if_aligned=False):
+    ''' Pad file object f using padding_bytes
+        @param f: file-like object
+        @param modulus: when to stop adding the padding
+        @param padding_bytes: bytes to use as padding (will be chopped if they wont fit evenly in the pad)
+                                if this is not desired, ensure that pad_size % len(padding_bytes) == 0
+        @param pad_if_aligned: add padding if file offset is already aligned to modulus?
+    '''
+    current = f.tell()
+    if pad_if_aligned == False and current % modulus == 0:
+        return
+    if padding_bytes == '':
+        return
+    
+    padding_len = modulus - (current % modulus)
+    logger.debug("padding EOF with %d null bytes", padding_len)
+    f.write(padding_bytes * (padding_len / len(padding_bytes)) + padding_bytes[:padding_len % len(padding_bytes)])
+    
 
 def write_from_file(out_file, in_file):
     ''' Writes in_file to the current file offset of out_file
