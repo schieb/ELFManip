@@ -264,19 +264,6 @@ class ELFManip(object):
     def set_section_offset(self, section, offset):
         section.sh_offset = offset
         section.segment.p_offset = offset
-    
-    
-    def write_from_file(self, out_file, in_file):
-        ''' Writes in_file to the current file offset of out_file
-            
-            @param out_file: output file
-            @param in_file: input file
-        '''
-        with open(in_file, "rb") as in_f:
-            for chunk in iter_chunks(in_f):
-                if chunk is None:
-                    break
-                out_file.write(chunk)
         
     def write_new_elf(self, outfile):
         if outfile == self.filename:
@@ -313,7 +300,7 @@ class ELFManip(object):
                 logger.debug("section offset for '%s': 0x%08x", section.filename, section_offset)
                 
                 # append the secton contents
-                self.write_from_file(f, section.filename)
+                write_from_file(f, section.filename)
                 section_end = f.tell()
                 
                 
@@ -352,18 +339,6 @@ class ELFManip(object):
         
         next_available_spot = last_alloc_section['sh_addr'] + last_alloc_section['sh_size']
         #TODO: finish this function
-    
-    ''' deprecated -- storing original section headers in self.shdrs
-    def get_section_headers(self):
-        sh_offset = self.elf.header.e_shoff
-        num_entries = self.elf.header.e_shnum
-        entry_size = self.elf.header.e_shentsize
-        with open(self.filename, "rb") as f:
-            f.seek(sh_offset)
-            section_headers = f.read(num_entries * entry_size)
-            
-        return section_headers
-    '''
     
     def get_program_headers(self):
         ph_offset = self.elf.header.e_phoff
@@ -540,7 +515,18 @@ class Custom_Segment(Segment):
                 flags |= PF_W
         return flags
         '''
+
+def write_from_file(out_file, in_file):
+    ''' Writes in_file to the current file offset of out_file
         
+        @param out_file: output file
+        @param in_file: input file
+    '''
+    with open(in_file, "rb") as in_f:
+        for chunk in iter_chunks(in_f):
+            if chunk is None:
+                break
+            out_file.write(chunk)
     
 def iter_chunks(file_object, block_size=1024):
     while True:
