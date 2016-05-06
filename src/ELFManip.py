@@ -290,24 +290,21 @@ class ELFManip(object):
         # copy the entire file first
         copy(self.filename, outfile)
         with open(outfile, "r+b") as f:
-            # we must (I strongly believe) add padding_len to cover all of the .bss section
-            #    or more generally the last section (if it is of type NOBITS)
-            #self.padBss(f)
-            
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             for section in self.custom_sections:
                 
-                current = f.tell()
+                # NOTE: the addition of padding was not tested very much
+                #        it could be the case that we can get away with padding less
+                #        basically I am attempting to play it safe
                 
                 # pad to section alignment
-                #padding_len = section.sh_addralign - (current % section.sh_addralign)
+                current = f.tell()
                 padding_len = PAGESIZE - (current % PAGESIZE)
                 logger.debug("padding EOF with %d null bytes", padding_len)
                 f.write("\x00" * padding_len)
                 
-                # add extra page worth of padding (hardcoded to handle small bss for now)
-                #TODO: test with this PAGESIZE padding removed later
+                # add extra page worth of padding
                 logger.debug("padding EOF with additional 0x%x null bytes", PAGESIZE)
                 f.write("\x00" * PAGESIZE)
                 
@@ -319,21 +316,8 @@ class ELFManip(object):
                 self.write_from_file(f, section.filename)
                 section_end = f.tell()
                 
-                # update the offset and size fields in the section header entry
-                #section.sh_addr = self.image_base + section_offset
                 
-                #TODO: determine this programatically as the next available page address
-                #section.sh_addr = 0x08046000 
-                #section.sh_addr = 0x0804c000 # one page after bss
-                #section.sh_vaddr = self.offset_to_vaddr(section_offset)
                 self.set_section_offset(section, section_offset)
-                #section.sh_offset = section_offset
-                #section.sh_size = section_end - section_offset
-            
-            
-            # we are adding the segment every time a custom section is added
-            #self._add_segment(self.custom_sections, 0x08046000)
-            #elf._add_segment(self.custom_sections, 0x0804c000)
             
             
             # copy the section headers to the current file offset (end of the file)
@@ -349,67 +333,12 @@ class ELFManip(object):
             f.write(self.get_sh_table())
             
             
-            # copy the program headers to the end space that was determined in relocate_phdrs
+            # copy the program headers to the space that was determined in relocate_phdrs
             self.write_phdrs(f)
-            '''
-            logger.debug("Appending %d program header entries", len(self.phdrs['entries']))
-            f.write(self.get_ph_table())
-            
-            logger.info("Appending %d custom program header entries", len(self.custom_sections))
-            f.write(''.join(segment.dump_entry() for segment in self.custom_segments))
-            '''
-            
             
             self.patch_elf_header(f, new_sh_offset, self.phdrs['base'])
             
-            print "finished writing ELF"
-            
-            
-            
-            ''' old hardcoded stuffs
-            # patch the program header R/X segment in a hack way for testing
-            # p_vaddr
-            #f.seek(PH_START + 32*2 + 4*2)
-            #f.write(struct.pack("<i", 0x08047000))
-            
-            #TODO: wrap this into a funciton to update an arbitrary segment header entry
-            # PHDR entry:
-            # p_offset
-            f.seek(new_ph_offset + 32*0 + 4*1)
-            f.write(struct.pack("<i", new_ph_offset))
-            
-            # p_vaddr
-            f.seek(new_ph_offset + 32*0 + 4*2)
-            f.write(struct.pack("<i", self.image_base + new_ph_offset))
-            
-            
-            # first LOAD segment:
-            # p_filsz
-            f.seek(new_ph_offset + 32*2 + 4*4)
-            old_size = struct.unpack("<i", f.read(4))[0]
-            new_size = old_size + 0x4000 +  self.custom_sections[0].sh_size
-            f.seek(new_ph_offset + 32*2 + 4*4)
-            f.write(struct.pack("<i", new_size))
-            
-            # p_memsz
-            f.seek(new_ph_offset + 32*2 + 4*5)
-            f.write(struct.pack("<i", new_size))
-            
-            
-            # debugging bus error...
-            # pad to 0x3000 then write the file again
-            
-            f.seek(0, 2)
-            current = f.tell()
-            print hex(current)
-            
-            padding_len = 0x3000 - current
-            f.write("\x00" * padding_len)
-            print hex(f.tell())
-            
-            self.write_from_file(f, self.custom_sections[0].filename)
-            print hex(f.tell())
-        '''
+            logger.info("finished writing ELF")
     
     def offset_to_vaddr(self, offset):
         # find the last section with attribute ALLOC
