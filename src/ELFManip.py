@@ -65,9 +65,6 @@ class ELFManip(object):
         
         self.image_base = self._get_image_base()
         logger.info("Image base: 0x%08x", self.image_base)
-        if self.image_base != 0x08048000:
-            logger.error("strange image base 0x%08x. Need to check that no code assumes 0x08048000 as the base", self.image_base)
-            raise BadELF('bad image base')
         
         
         self.custom_sections = []
