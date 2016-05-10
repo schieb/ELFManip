@@ -5,37 +5,40 @@
 '''
 
 import sys
-from ELFManip import ELFManip
+import os
+from ELFManip import ELFManip, Custom_Section, Custom_Segment
+from Constants import PT_LOAD
+
+def get_filesize(filename):
+    return os.path.getsize(filename)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print "Usage: %s [file1] ([file2] ... [filen])" % sys.argv[0]
+    if len(sys.argv) != 2:
+        print "Usage: %s [file1]" % sys.argv[0]
         exit()
+        
+    elf_filename = sys.argv[1]
+    elf = ELFManip(elf_filename)
     
-    for elf_filename in sys.argv[1:]:
-        print "working on %s" % elf_filename
-        elf = ELFManip(elf_filename)
-        
-        
-        #hash_table_section = "/mnt/hgfs/GitHub/Delinker/tests/hash_table"
-        #new_RX_section = "/mnt/hgfs/GitHub/Delinker/tests/RX_new"
-        
-        section1 = "./test_segment"
-        section2 = "./test_segment"
-        
-        section1_addr = 0x09000000;
-        section2_addr = 0x07000000;
-        
-        section = elf.add_section(section1, sh_addr = section1_addr)
-        if section is None:
-            print "section add failure"
-            exit()
-        section = elf.add_section(section2, sh_addr = section2_addr)
-        if section is None:
-            print "section add failure"
-            exit()
-        #elf.set_entry_point(0x090753a2) # gcc::_start()
-        
-        elf.write_new_elf(elf.filename + ".new")
+    filename = '../tests/erick/newbytes'
+    with open(filename, 'r') as f:
+        newbytes = f.read()
+    
+    newbytes_section = Custom_Section(newbytes, sh_addr = 0x09000000)
+    if newbytes_section is None:
+        print "add_section failure -- aborting"
+        continue
+    
+    newbytes_segment = Custom_Segment(PT_LOAD)
+    elf_segment = elf.add_segment(my_segment)
+    elf.add_section(newbytes_section, my_segment)
+    
+    #elf_segment.register_section(newbytes_section)
+    
+    elf.set_entry_point(0x092e221e)
+    
+    elf.write_new_elf(elf.filename + ".new")
     
     
+
+
