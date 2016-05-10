@@ -33,7 +33,6 @@ import os
 from shutil import copy
 
 import logging
-from elftools.elf.constants import SH_FLAGS
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 sh = logging.StreamHandler()
@@ -73,10 +72,11 @@ class ELFManip(object):
         #      add differentiation between unbacked sections and sections backed by a segment
         self.custom_sections = []
         
+        #self.relocated_phrds = False
+        
         self.shdrs = self._init_shdrs()
         
         self.phdrs = self._init_phdrs()
-        self.relocate_phdrs()
         
         self.new_entry_point = None
     
@@ -110,17 +110,31 @@ class ELFManip(object):
         logger.debug("Copying %d section headers from %s", len(shdrs['entries']), self.filename)
         return shdrs
     
-    def relocate_phdrs(self):
+    def relocate_phdrs(self, new_offset=None, new_size=None, segment=None):
         ''' Attempts to find a new location for the program headers to reside in the ELF image
-        
+            @param new_offset: offset to move the phdrs to. if -1, move to the end of the file
+            @warning: user should be very careful in specifying new_offset
+            @note: new_size should ideally be a multiple of e_phentsize (not enforced)
         '''
-        #TODO: rename this function
-        # find the gap between 'AX' and 'WA' segments
+        if new_offset is not None:
+            if new_size is None:
+                logger.warn("You must specify the size of the relocated program headers")
+                return None
+            # take the user's offset as a command - don't ask questions, just do!
+            logger.debug("Moving program headers to offset 0x%08x")
+            self._update_phdr_entry(new_offset, new_size, segment)
+        else:
+            self._phdr_hack()
+        
+    def _phdr_hack(self):
+        ''' Check for free space in the ELF big enough to store the original program headers plus some extras 
+        '''
         logger.debug("Looking for sufficient padding between LOAD segments to relocate the PHDRs to")
         section_before_padding = None
         section_after_padding = None
         
-        #TODO: generalize this to handle unordered section header entries
+        # find the gap between 'AX' and 'WA' segments
+        #TODO: generalize this to handle unordered section header entries (legal?)
         for section in self.elf.iter_sections():
             if section['sh_flags'] & SHF_WRITE:
                 section_after_padding = section
@@ -157,7 +171,7 @@ class ELFManip(object):
                     if b != "\x00":
                         empty = False
                 if not empty:
-                    # not sure why this would ever happen in a legitimate binary
+                    # not sure why this would ever happen in a legitimate binary but issue a warning nonetheless
                     logger.warn("Padding is not empty... repurposing anyways")
                     
             self._update_phdr_entry(free_space_start, free_space_size)
@@ -180,10 +194,11 @@ class ELFManip(object):
                     logger.info("should have room to add one section/segment")
                     break
         
-    def _update_phdr_entry(self, new_base, max_size):
+    def _update_phdr_entry(self, new_base, max_size, segment=None):
         ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
             @param new_base: offset at which the program headers will be located
             @param max_size: maximum size in bytes that the new program headers can grow to
+            TODO: segment parameter is a quick hack and might need to be refactored
         '''
         
         self.phdrs['base'] = new_base
@@ -191,7 +206,7 @@ class ELFManip(object):
         
         # update the offset in the PHDR segment entry
         for p in self.phdrs['entries']:
-            # Note: shared objects have no phdr entry in segment headers
+            # Note: shared objects and statically linked executables have no phdr entry in segment headers
             if p.p_type == PT_PHDR:
                 logger.debug("Updating the PHDR segment to new offset: 0x%x", self.phdrs['base'])
                 p.p_offset = self.phdrs['base']
@@ -200,21 +215,27 @@ class ELFManip(object):
                 p.p_filesz = len(self.phdrs['entries']) * 32 # 32 bytes each
                 p.p_memsz = p.p_filesz
         
-        # expand the size of the LOAD segment that contains the enlarged program headers
-        # otherwise, the page may not get mapped into memory
-        found = False
-        for segment in self.phdrs['entries']:
-            if segment.p_type != PT_LOAD:
-                continue
-            if segment.p_offset + segment.p_filesz == new_base:
-                found = True
-                segment.p_filesz += len(self.get_ph_table())
-                segment.p_memsz  = segment.p_filesz
-                break
-                
-        if not found:
-            logger.error("problem finding LOAD segment containing new phdr location")
-            raise BadELF("can't find LOAD segment")
+        if segment is not None:
+            # now that the phdrs have sufficient room, we can add the user supplied segment
+            logger.debug("Added user defined segment backing the new program headers")
+            self.add_segment(segment)
+            
+        else:
+            # expand the size of the LOAD segment that contains the enlarged program headers
+            # otherwise, the page may not get mapped into memory
+            found = False
+            for segment in self.phdrs['entries']:
+                if segment.p_type != PT_LOAD:
+                    continue
+                if segment.p_offset + segment.p_filesz == new_base:
+                    found = True
+                    segment.p_filesz += len(self.get_ph_table())
+                    segment.p_memsz  = segment.p_filesz
+                    break
+                    
+            if not found:
+                logger.error("problem finding LOAD segment containing new phdr location")
+                raise BadELF("can't find LOAD segment")
         
         
     def write_phdrs(self, outfile):
@@ -520,12 +541,14 @@ class Custom_Segment(Segment):
         '''
         for section in self.sections:
             assert section.is_defined() == True
-        self.p_offset = min((section.sh_offset for section in self.sections))
-        self.p_vaddr = min((section.sh_addr for section in self.sections))
-        self.p_paddr = self.p_vaddr
-        self.p_filesz = self._get_p_filesz()
-        self.p_memsz = self._get_p_memsz()
-        self.p_flags = self._union_section_flags()
+        # only makes sense if this segment has sections
+        if len(self.sections) > 0:
+            self.p_offset = min((section.sh_offset for section in self.sections))
+            self.p_vaddr = min((section.sh_addr for section in self.sections))
+            self.p_paddr = self.p_vaddr
+            self.p_filesz = self._get_p_filesz()
+            self.p_memsz = self._get_p_memsz()
+            self.p_flags = self._union_section_flags()
 
 
 def pad_to_modulus(f, modulus, padding_bytes='\x00', pad_if_aligned=False):
