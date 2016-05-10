@@ -3,21 +3,22 @@
 '''
 TODO:
     Must-dos:
-    - propogate rearchitecture to write_new_elf()
-        - need more automation, less hard-coding during section writing and segment updating
-    - add method to move program headers into the .note.* sections (and move .interp)
+    - ability to *always* be able to relocate the program headers
+    - ability to specify a section's file offset field (currently ignored and overwritten when writing the ELF)
+        - would require intelligent book-keeping when adding and writing sections to the ELF file 
     
     Features:
     - option to name the section when adding it
-    - specify section attributes
 
 
 '''
  
  
 from Constants import (SHF_WRITE,
+                       SHF_EXECINSTR,
                        SHN_UNDEF,
                        SHT_PROGBITS,
+                       SHT_NOBITS,
                        PF_X, PF_W, PF_R,
                        PT_LOAD,
                        PT_PHDR,
@@ -32,6 +33,7 @@ import os
 from shutil import copy
 
 import logging
+from elftools.elf.constants import SH_FLAGS
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 sh = logging.StreamHandler()
@@ -67,6 +69,8 @@ class ELFManip(object):
         logger.info("Image base: 0x%08x", self.image_base)
         
         
+        #TODO: replace custom_sections with functions that interface wth Custom_Segment objects inside self.phdrs['entries']
+        #      add differentiation between unbacked sections and sections backed by a segment
         self.custom_sections = []
         
         self.shdrs = self._init_shdrs()
@@ -218,31 +222,25 @@ class ELFManip(object):
         logger.debug("Writing program headers to offset 0x%x", outfile.tell())
         outfile.write(self.get_ph_table())
     
-    def add_section(self, section_contents, **kwargs):
-        ''' Add a section to the ELF file with contents of section_contents
-            A segment will automatically be created for each added section
+    
+    def add_section(self, section, segment=None):
+        assert isinstance(section, Custom_Section)
+        if segment is not None:
+            assert isinstance(segment, Custom_Segment)
+            segment.register_section(section)
             
-            @param section_contents: filename holding the contents of the section
-            @param kwargs: optional custom section properties as defined in the ELF spec
-            @return: Custom_Section object or None on failure
+        self.custom_sections.append(section)
         
-        '''
-        # check that there is enough room to add the segment that will end up mapping this new section
+        
+    def add_segment(self, segment):
+        assert isinstance(segment, Custom_Segment)
+        # check for room in program headers for a new entry
         if len(self.phdrs['entries']) < self.phdrs['max_num']:
-            # initialize the section and save it in custom_sections
-            self.custom_sections.append(Custom_Section(section_contents, **kwargs))
-            # do the same with its corresponding segment
-            self._add_segment(self.custom_sections[-1], self.custom_sections[-1].sh_addr)
+            self.phdrs['entries'].append(segment)
         else:
             logger.error("Cannot add another section. Not enough room in the program headers to add another segment")
             return None
-        return self.custom_sections[-1]
-        
-    def _add_segment(self, section, load_addr):
-        # add a segment that will contain all of the sections in 'sections'
-        #TODO: convert to use self.phdrs['entries']
-        new_segment = Custom_Segment([section], load_addr)
-        self.phdrs['entries'].append(new_segment)
+        return self.phdrs['entries'][-1]
         
     def get_sh_table(self):
         ''' Get the section header table which includes all of the original section header entries
@@ -256,6 +254,9 @@ class ELFManip(object):
         ''' Get the program header table which includes all of the original program header entries
             plus all of the entries for the custom segments
         '''
+        for phdr in self.phdrs['entries']:
+            if isinstance(phdr, Custom_Segment):
+                phdr.finalize()
         return ''.join(p.dump_entry() for p in self.phdrs['entries'])
     
     def set_section_offset(self, section, offset):
@@ -276,6 +277,19 @@ class ELFManip(object):
         with open(outfile, "r+b") as f:
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
+            
+            for phdr in self.phdrs['entries']:
+                if not isinstance(phdr, Custom_Segment):
+                    continue
+                for section in phdr.sections:
+                    pad_to_modulus(f, PAGESIZE)
+                    pad_to_modulus(f, PAGESIZE, pad_if_aligned=True)
+                    section_offset = f.tell()
+                    f.write(section.contents)
+                    
+                    section.sh_offset = section_offset
+            
+            """
             for section in self.custom_sections:
                 
                 # NOTE: the addition of padding was not tested very much
@@ -298,7 +312,7 @@ class ELFManip(object):
                 
                 
                 self.set_section_offset(section, section_offset)
-            
+            """
             
             # copy the section headers to the current file offset (end of the file)
             pad_to_modulus(f, 0x10)
@@ -367,7 +381,7 @@ class Section(object):
     '''
     def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize):
         
-        self.sh_name = sh_name # randomish name from the section header string table
+        self.sh_name = sh_name
         self.sh_type = sh_type
         self.sh_flags = sh_flags
         self.sh_addr = sh_addr
@@ -402,13 +416,14 @@ class Section(object):
 
 class Custom_Section(Section):
     ''' 
-    
+        TODO: sections cannot be given a specific file offset, instead it is determined when the ELF file is written
+                user might want control over this
     '''
-    def __init__(self, contents, sh_type=SHT_PROGBITS, sh_flags=PF_X | PF_W | PF_R, sh_addr=None):
+    def __init__(self, contents='', sh_type=SHT_PROGBITS, sh_flags=PF_X | PF_W | PF_R, sh_addr=None):
         '''
         @param contents: file containing section contents
         '''
-        super(self.__class__, self).__init__(0x1f,
+        super(self.__class__, self).__init__(0x1f, # randomish name from the section header string table
                                              sh_type,
                                              sh_flags,
                                              sh_addr,
@@ -418,22 +433,19 @@ class Custom_Section(Section):
                                              0,
                                              0x10,
                                              0)
-        self.filename = contents
+        self.contents = contents
+        if self.sh_size is None:
+            self.sh_size = len(contents)
         
-        self._update_size()
-        
-        print "Created custom section from file '%s'" % self.filename
+        print "Created custom section:"
         self.describe_section()
-        
     
-    def _update_size(self):
-        ''' Set the size of the section to match the size of the file that is backing the section
-        '''
-        if self.sh_size is None or self.sh_size == 0:
-            print self.filename
-            self.sh_size = os.path.getsize(self.filename)
-        
-    
+    def is_defined(self):
+        for attr in [self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, self.sh_offset, self.sh_size, 
+                     self.sh_link, self.sh_info, self.sh_addralign, self.sh_entsize]:
+            if attr is None:
+                return False
+        return True
 
 class Segment(object):
     def __init__(self, p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align):
@@ -452,51 +464,48 @@ class Segment(object):
                            self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
 
 class Custom_Segment(Segment):
-    def __init__(self, sections, load_addr):
+    def __init__(self, p_type, p_offset=None, p_vaddr=None, p_paddr=None, p_filesz=None, p_memsz=None, p_flags=None, p_align=0x1000):
         ''' 
         Just like a Segment except we need to do special things to make sure that the segments are mapped correctly
         
-        @param sections: the sections that this segment will map into memory
-        @note: for now we are only accepting one section per segment.
-                    handling multiple sections should not be too hard or a feature to add
-        @param load_addr: the virtual address at which the section belonging to this segment
-                    will be loaded into
         '''
-        self.sections = sections
-        assert len(self.sections) == 1
         
-        assert isinstance(self.sections[0], Custom_Section)
+        super(self.__class__, self).__init__(p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align)
         
-        self.sections[0].segment = self # nasty, hopefully temporary hack
-        
-        super(self.__class__, self).__init__(PT_LOAD,
-                                             #self._get_p_offset,
-                                             None, # undefined until the undelying section gets an offset
-                                             load_addr,
-                                             load_addr,
-                                             self._get_p_filesz(),
-                                             self._get_p_filesz(), # assuming no new bss
-                                             self._union_section_flags(),
-                                             0x1000)
+        self.sections = []
     
-    ''' deprecated -- not being used at the moment
-    def _get_p_offset(self):
-        # find the minimum file offset of all the sections
-        p_offset = None
-        for section in self.sections:
-            if p_offset is None:
-                p_offset = section.sh_offset
-            elif p_offset > section.sh_offset:
-                p_offset = section.sh_offset
-        return p_offset
-    '''
+        
+    def register_section(self, section):
+        ''' associate section with this segment
+        '''
+        assert isinstance(section, Custom_Section)
+        self.sections.append(section)
     
     def _get_p_filesz(self):
-        return sum(section.sh_size for section in self.sections)
+        if len(self.sections) == 0:
+            return 0
+        
+        sections_sorted = sorted(self.sections, key=lambda s: s.sh_addr)
+        first = sections_sorted[0]
+        last = sections_sorted[-1]
+        if last.sh_type == SHT_NOBITS:
+            filesz = last.sh_addr - first.sh_addr
+        else:
+            filesz = last.sh_addr + last.sh_size - first.sh_addr
+        
+        return filesz
+    
+    def _get_p_memsz(self):
+        if len(self.sections) == 0:
+            return 0
+        
+        sections_sorted = sorted(self.sections, key=lambda s: s.sh_addr)
+        first = sections_sorted[0]
+        last = sections_sorted[-1]
+        
+        return last.sh_addr + last.sh_size - first.sh_addr
     
     def _union_section_flags(self):
-        return PF_X | PF_W | PF_R
-        '''
         flags = PF_R
         for section in self.sections:
             if section.sh_flags & SHF_EXECINSTR:
@@ -504,7 +513,20 @@ class Custom_Segment(Segment):
             if section.sh_flags & SHF_WRITE:
                 flags |= PF_W
         return flags
+    
+    def finalize(self):
+        ''' call after all sections have been added to this segment and those sections properties are also finalized
+            this will attempt to fill in all the correct phdr values with respect to the sections that have been registered
         '''
+        for section in self.sections:
+            assert section.is_defined() == True
+        self.p_offset = min((section.sh_offset for section in self.sections))
+        self.p_vaddr = min((section.sh_addr for section in self.sections))
+        self.p_paddr = self.p_vaddr
+        self.p_filesz = self._get_p_filesz()
+        self.p_memsz = self._get_p_memsz()
+        self.p_flags = self._union_section_flags()
+
 
 def pad_to_modulus(f, modulus, padding_bytes='\x00', pad_if_aligned=False):
     ''' Pad file object f using padding_bytes
