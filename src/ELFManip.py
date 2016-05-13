@@ -22,6 +22,7 @@ from Constants import (SHF_WRITE,
                        PF_X, PF_W, PF_R,
                        PT_LOAD,
                        PT_PHDR,
+                       PT_INTERP,
                        )
 
 from elftools.elf.elffile import ELFFile
@@ -104,9 +105,15 @@ class ELFManip(object):
         shdrs = {'base': None, 'entries': []}
         # copy all the original section headers from the ELF file
         for s in self.elf.iter_sections():
+            if s['sh_type'] == SHT_NOBITS:
+                contents = ''
+            else:
+                self.elf.stream.seek(s['sh_offset'])
+                contents = self.elf.stream.read(s['sh_size'])
             shdrs['entries'].append(Section(s['sh_name'], ENUM_SH_TYPE[s['sh_type']], s['sh_flags'], 
                                             s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'], 
-                                            s['sh_info'], s['sh_addralign'], s['sh_entsize']))
+                                            s['sh_info'], s['sh_addralign'], s['sh_entsize'],
+                                            contents))
         logger.debug("Copying %d section headers from %s", len(shdrs['entries']), self.filename)
         return shdrs
     
@@ -115,6 +122,7 @@ class ELFManip(object):
             @param new_offset: offset to move the phdrs to. if -1, move to the end of the file
             @warning: user should be very careful in specifying new_offset
             @note: new_size should ideally be a multiple of e_phentsize (not enforced)
+            @return: location of the new phdrs (could be the original location)
         '''
         if new_offset is not None:
             if new_size is None:
@@ -125,6 +133,8 @@ class ELFManip(object):
             self._update_phdr_entry(new_offset, new_size, segment)
         else:
             self._phdr_hack()
+            
+        return self.phdrs['base']
         
     def _phdr_hack(self):
         ''' Check for free space in the ELF big enough to store the original program headers plus some extras 
@@ -163,6 +173,7 @@ class ELFManip(object):
             logger.debug("Found enough space to move the program headers!")
             
             # check that this space is actually empty
+            #TODO: use self._f or self.elf instead of reopening the file
             empty = True
             with open(self.filename) as f:
                 f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
@@ -175,7 +186,6 @@ class ELFManip(object):
                     logger.warn("Padding is not empty... repurposing anyways")
                     
             self._update_phdr_entry(free_space_start, free_space_size)
-            
         else:
             logger.warn("Not enough space to relocate the program headers. Try repurposing the GNU_STACK entry" + \
                         " or moving the .interp section and removing the .note.* sections")
@@ -193,6 +203,7 @@ class ELFManip(object):
                     #assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
                     logger.info("should have room to add one section/segment")
                     break
+        
         
     def _update_phdr_entry(self, new_base, max_size, segment=None):
         ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
@@ -299,6 +310,8 @@ class ELFManip(object):
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
             
+            #TODO: add sections according to the requested offset (if present)
+            #        right now, any requested offset is being ignored
             for phdr in self.phdrs['entries']:
                 if not isinstance(phdr, Custom_Segment):
                     continue
@@ -350,6 +363,15 @@ class ELFManip(object):
             
             self.patch_elf_header(f, new_sh_offset, self.phdrs['base'])
             
+            # process any patches that were registered for Section objects via section.write()
+            #TODO: more elegant solution for this and writing the final ELF in general
+            for i, section in enumerate(self.shdrs['entries']):
+                for new_bytes, section_offset in section.buffered_writes:
+                    logger.debug("Patching in user-defined bytes for section %d", i)
+                    file_offset = section.sh_offset + section_offset
+                    f.seek(file_offset)
+                    f.write(new_bytes)
+            
             logger.info("finished writing ELF")
     
     def offset_to_vaddr(self, offset):
@@ -375,10 +397,59 @@ class ELFManip(object):
             
         return program_headers
     
+    def addr_to_section(self, addr):
+        ''' Returns the section that contains addr or None
+        '''
+        # NOTE: section bounds check does not include padding if present
+        # NOTE: bss sections will return None
+        # TODO: check custom sections once offset placement is enforced
+        for section in self.shdrs['entries']:
+            if section.sh_type == SHT_NOBITS:
+                continue
+            if section.sh_addr <= addr < section.sh_addr + section.sh_size:
+                return section
+        return None
+    
+    def offset_to_section(self, offset):
+        ''' Returns the section that contains offset or None
+        '''
+        # NOTE: section bounds check does not include padding if present
+        # NOTE: bss sections will return None
+        # TODO: check custom sections once offset placement is enforced
+        for section in self.shdrs['entries']:
+            if section['sh_type'] == SHT_NOBITS:
+                continue
+            if section.sh_offset <= offset < section.sh_addr + section.sh_size:
+                return section
+        return None
+    
+    def write_to_section(self, section, new_bytes, offset=0):
+        if isinstance(section, Section):
+            return section.write(new_bytes, offset)
+        elif isinstance(section, Custom_Section):
+            logger.warn("this API is not available for Custom_Sections. change contents by using section.contents=updated_contents")
+        return None
+    
     def set_entry_point(self, entry_point):
+        #TODO: abstract to modify the header so we can just write the new header without checking which fields have been modified
+        #        or copy the old header and process pending changes (similar to recently added section modification)
         self.new_entry_point = entry_point
+        
+    def set_interp(self, new_interp):
+        ''' new_interp should be null-terminated
+        '''
+        interp_section = None
+        for segment in self.phdrs['entries']:
+            if segment.p_type == PT_INTERP:
+                interp_section = self.addr_to_section(segment.p_vaddr)
+                break
+        if interp_section is not None:
+            return self.write_to_section(interp_section, new_interp, 0)
+        
+        return None
     
     def patch_elf_header(self, f, new_sh_offset, new_ph_offset):
+        #TODO: abstract this function
         if self.new_entry_point is not None:
             f.seek(EP_OFFSET)
             f.write(struct.pack("<i", self.new_entry_point))
@@ -400,7 +471,7 @@ class Section(object):
         
         User-defined sections must be instanciated via the Custom_Section class
     '''
-    def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize):
+    def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize, contents):
         
         self.sh_name = sh_name
         self.sh_type = sh_type
@@ -415,12 +486,45 @@ class Section(object):
         
         self.segment = None # defined when a segment is created for this section
         
+        self.contents = contents
+        self.buffered_writes = []
+        
     
     def get_next_offset(self):
         ''' Determines the file offset at which this section will be placed in the ELF 
         '''
         pass
-        
+    
+    def write(self, new_bytes, offset=0):
+        ''' Write new_bytes to section offset
+        @note: written only when the ELF is written to disk
+        '''
+        #TODO: check that the size can fit in this section
+        if self.sh_type != SHT_NOBITS:
+            if len(new_bytes) <= self.sh_size - offset:
+                self.buffered_writes.append((new_bytes, offset))
+                return self
+        return None
+    
+    def get_original_bytes(self, offset=None, size=None):
+        ''' Returns the original, unmodified size number of bytes at offset
+        '''
+        if offset is None:
+            offset = 0
+        if size is None:
+            return self.contents[offset:]
+        else:
+            return self.contents[offset: offset + size]
+    
+    def get_current_contents(self):
+        ''' Returns len number of bytes at offset of the section contents that will be written to disk
+            This includes any modifications that have been saved using self.write()
+        '''
+        current_contents = self.contents
+        #TODO: sort by offset and write in one pass
+        for new_bytes, offset in self.buffered_writes:
+            current_contents = current_contents[0:offset] + new_bytes + current_contents[offset + len(new_bytes):]
+        return current_contents
         
     def dump_entry(self):
         return struct.pack("<10i", 
@@ -453,10 +557,11 @@ class Custom_Section(Section):
                                              SHN_UNDEF,
                                              0,
                                              0x10,
-                                             0)
-        self.contents = contents
+                                             0,
+                                             contents,
+                                             )
         if self.sh_size is None:
-            self.sh_size = len(contents)
+            self.sh_size = len(self.contents)
         
         print "Created custom section:"
         self.describe_section()
