@@ -18,7 +18,9 @@ if __name__ == "__main__":
         exit()
         
     elf_filename = sys.argv[1]
-    elf = ELFManip(elf_filename)
+    elf = ELFManip(elf_filename, num_adtl_segments=2)
+    
+    
     
     '''
     original_phdr_size = len(elf.get_ph_table())
@@ -35,7 +37,10 @@ if __name__ == "__main__":
     elf.phdrs['entries'].insert(0, phdr_segment)
     '''
     
-    actual_phdr_offset = elf.relocate_phdrs()
+    
+    new_phdr_offset = elf.relocate_phdrs()
+    
+    
     
     filename = '../tests/erick/newbytes'
     with open(filename, 'r') as f:
@@ -44,10 +49,26 @@ if __name__ == "__main__":
     newbytes_section = Custom_Section(newbytes, sh_addr = 0x09000000)
     newbytes_segment = Custom_Segment(PT_LOAD)
     elf_segment = elf.add_segment(newbytes_segment)
-    elf.add_section(newbytes_section, newbytes_segment)
+    if elf_segment is not None:
+        elf.add_section(newbytes_section, newbytes_segment)
     
     
-    elf.set_entry_point(0x092e221e)
+    newbytes_section = Custom_Section(newbytes, sh_addr = 0x07000000)
+    newbytes_segment = Custom_Segment(PT_LOAD)
+    elf_segment = elf.add_segment(newbytes_segment)
+    if elf_segment is not None:
+        elf.add_section(newbytes_section, newbytes_segment)
+    
+    '''
+    newbytes_section = Custom_Section(newbytes, sh_addr = 0x06000000)
+    newbytes_segment = Custom_Segment(PT_LOAD)
+    elf_segment = elf.add_segment(newbytes_segment)
+    if elf_segment is not None:
+        elf.add_section(newbytes_section, newbytes_segment)
+    '''
+    
+    
+    #elf.set_entry_point(0x092e221e)
     
     elf.write_new_elf(elf.filename + ".new")
     
