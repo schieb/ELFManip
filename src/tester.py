@@ -9,6 +9,8 @@ import os
 from ELFManip import ELFManip, Custom_Section, Custom_Segment
 from Constants import PT_LOAD, PF_R
 
+NUM_REQUESTED_SEGMENTS = 2
+
 def get_filesize(filename):
     return os.path.getsize(filename)
 
@@ -18,28 +20,12 @@ if __name__ == "__main__":
         exit()
         
     elf_filename = sys.argv[1]
-    elf = ELFManip(elf_filename, num_adtl_segments=2)
-    
-    
-    
-    '''
-    original_phdr_size = len(elf.get_ph_table())
-    desired_phdr_offset = os.path.getsize(elf_filename) # at EOF
-    
-    # create the segment that will map in the program headers for us
-    phdr_segment = Custom_Segment(PT_LOAD, p_offset=desired_phdr_offset, p_vaddr=0x08000000, p_paddr=0x08000000, 
-                                  p_filesz=original_phdr_size, p_memsz=original_phdr_size, p_flags=PF_R)
-    
-    actual_phdr_offset = elf.relocate_phdrs(desired_phdr_offset, original_phdr_size + (32*2), phdr_segment) # want 2 new entries of 32 bytes each
-    
-    # test reordering the phdrs; putting phdr_segment just after the segment of type PHDR (if present)
-    phdr_segment = elf.phdrs['entries'].pop()
-    elf.phdrs['entries'].insert(0, phdr_segment)
-    '''
-    
+    elf = ELFManip(elf_filename, num_adtl_segments=NUM_REQUESTED_SEGMENTS)
     
     new_phdr_offset = elf.relocate_phdrs()
-    
+    if elf.phdrs['max_num'] < NUM_REQUESTED_SEGMENTS:
+        print "failed to secure %d additional segment header entries" % NUM_REQUESTED_SEGMENTS
+        exit()
     
     
     filename = '../tests/erick/newbytes'
