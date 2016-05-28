@@ -534,9 +534,12 @@ class ELFManip(object):
             
             # copy the program headers to the space that was determined in relocate_phdrs
             logger.debug("Writing program headers to offset 0x%x", self.phdrs['base'])
-            self.ehdr['phoff'] = self.phdrs['base']
+            self.ehdr['e_phoff'] = self.phdrs['base']
             f.seek(self.phdrs['base'])
-            f.write(self.dump_phdrs())
+            
+            phdr_bytes = self.dump_phdrs()
+            f.write(phdr_bytes)
+            
             
             # write the new elf header
             f.seek(0)
@@ -552,7 +555,8 @@ class ELFManip(object):
                     f.seek(file_offset)
                     f.write(new_bytes)
             
-            logger.info("finished writing ELF")
+        self._sanity()
+        logger.info("finished writing ELF")
     
     ''' don't think we will need this
     def offset_to_vaddr(self, offset):
@@ -617,6 +621,16 @@ class ELFManip(object):
             return self.write_to_section(interp_section, new_interp, 0)
         
         return None
+    
+    def _sanity(self):
+        ''' Help catch illusive bugs
+        '''
+        if len(self.ehdr) != 14:
+            logger.error("ELF header has unexpected number of members - potential bug")
+        if len(self.phdrs) != 4:
+            logger.error("Program headers have unexpected number of members - potential bug")
+        if len(self.shdrs) != 2:
+            logger.error("Section headers have unexpected number of members - potential bug")
     
     ''' deprecated -- keep changes in a local copy of the original ELF header
                       and write that out when finished ELF manipulations
@@ -705,8 +719,8 @@ class Section(object):
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                            self.sh_addralign, self.sh_entsize)
         
-    def describe_section(self):
-        print "Name: 0x%x, Type: %s, Flags: %s, Addr: 0x%08x, Offset: %s, Size: %s bytes, Link: %s, Info: %s, Align: %d, EntSz: %d" % \
+    def __str__(self):
+        return "Name: 0x%x, Type: %s, Flags: %s, Addr: 0x%08x, Offset: %s, Size: %s bytes, Link: %s, Info: %s, Align: %d, EntSz: %d" % \
                 (self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, 
                  self.sh_offset, self.sh_size, self.sh_link, self.sh_info, 
                  self.sh_addralign, self.sh_entsize)
@@ -737,7 +751,7 @@ class Custom_Section(Section):
             self.sh_size = len(self.contents)
         
         print "Created custom section:"
-        self.describe_section()
+        print self
     
     def is_defined(self):
         for attr in [self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, self.sh_offset, self.sh_size, 
@@ -756,7 +770,12 @@ class Segment(object):
         self.p_memsz = p_memsz
         self.p_flags = p_flags
         self.p_align = p_align
-        
+    
+    def __str__(self):
+        return "Type: 0x%x, Offset: 0x%08x, Vaddr: 0x%08x, Paddr: 0x%08x, Filesize: 0x%08x, Memsize: 0x%08x, Flags: 0x%08x, Align: %d" % \
+                (self.p_type, self.p_offset, self.p_vaddr, self.p_paddr, 
+                 self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
+    
     def dump_entry(self):
         return struct.pack("<8i", 
                            self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
