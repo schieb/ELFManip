@@ -16,14 +16,17 @@ def get_filesize(filename):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print "Usage: %s [file1]" % sys.argv[0]
+        print "Usage: %s [file]" % sys.argv[0]
         exit()
         
     elf_filename = sys.argv[1]
     elf = ELFManip(elf_filename, num_adtl_segments=NUM_REQUESTED_SEGMENTS)
     
+    old_num_phdrs = elf.phdrs['max_num']
+    
     new_phdr_offset = elf.relocate_phdrs()
-    if elf.phdrs['max_num'] < NUM_REQUESTED_SEGMENTS:
+    
+    if elf.phdrs['max_num'] < old_num_phdrs + NUM_REQUESTED_SEGMENTS:
         print "failed to secure %d additional segment header entries" % NUM_REQUESTED_SEGMENTS
         exit()
     
