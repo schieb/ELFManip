@@ -82,6 +82,7 @@ PT_INTERP   = 3
 PT_NOTE     = 4
 PT_SHHLIB   = 5
 PT_PHDR     = 6
+PT_TLS      = 7
 PT_LOPROC   = 0x70000000
 PT_HIPROC   = 0x7fffffff
 
