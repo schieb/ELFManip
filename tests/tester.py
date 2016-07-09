@@ -6,8 +6,8 @@
 
 import sys
 import os
-from ELFManip import ELFManip, Custom_Section, Custom_Segment
-from Constants import PT_LOAD, PF_R
+from .src.ELFManip import ELFManip, Custom_Section, Custom_Segment
+from .src.Constants import PT_LOAD, PF_R
 
 NUM_REQUESTED_SEGMENTS = 2
 
