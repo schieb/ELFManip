@@ -15,6 +15,7 @@ TODO:
  
  
 from Constants import (SHF_WRITE,
+                       SHF_ALLOC,
                        SHF_EXECINSTR,
                        SHN_UNDEF,
                        SHT_PROGBITS,
@@ -731,7 +732,7 @@ class Custom_Section(Section):
         TODO: sections cannot be given a specific file offset, instead it is determined when the ELF file is written
                 user might want control over this
     '''
-    def __init__(self, contents='', sh_type=SHT_PROGBITS, sh_flags=PF_X | PF_W | PF_R, sh_addr=None):
+    def __init__(self, contents='', sh_type=SHT_PROGBITS, sh_flags=SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR, sh_addr=None):
         '''
         @param contents: file containing section contents
         '''
