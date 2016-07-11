@@ -1,0 +1,40 @@
+gdb-peda$ b do_thread_stuff 
+Breakpoint 1 at 0x804862e: file test-tls.c, line 27.
+gdb-peda$ r
+...
+Breakpoint 1, do_thread_stuff (args=0x0) at test-tls.c:27
+27		pthread_mutex_lock(&lock);
+gdb-peda$ print &thread_buf 
+$1 = (char (*)[128]) 0xf7df1ac4
+gdb-peda$ searchmem "This is the TLS"
+Searching for 'This is the TLS' in: None ranges
+Found 4 results, display max 4 items:
+test-tls.new : 0x9000000 ("This is the TLS newbytes file. Hopefully it will be located in a predictable place after the last .t* section (.tbss if present).\n")
+      mapped : 0xf75f0abc ("This is the TLS newbytes file. Hopefully it will be located in a predictable place after the last .t* section (.tbss if present).\n")
+      mapped : 0xf7df1abc ("This is the TLS newbytes file. Hopefully it will be located in a predictable place after the last .t* section (.tbss if present).\n")
+      mapped : 0xf7df26fc ("This is the TLS newbytes file. Hopefully it will be located in a predictable place after the last .t* section (.tbss if present).\n")
+gdb-peda$ print 0xf7df1ac4 - 0xf7df1abc
+$2 = 0x8
+gdb-peda$ info threads
+[New Thread 0xf75f0b40 (LWP 9816)]
+  Id   Target Id         Frame 
+  3    Thread 0xf75f0b40 (LWP 9816) "test-tls.new" clone () at ../sysdeps/unix/sysv/linux/i386/clone.S:108
+* 2    Thread 0xf7df1b40 (LWP 9815) "test-tls.new" do_thread_stuff (args=0x0) at test-tls.c:27
+  1    Thread 0xf7df2780 (LWP 9811) "test-tls.new" clone () at ../sysdeps/unix/sysv/linux/i386/clone.S:108
+gdb-peda$ thread 3
+[Switching to thread 3 (Thread 0xf75f0b40 (LWP 9816))]
+#0  clone () at ../sysdeps/unix/sysv/linux/i386/clone.S:108
+108	../sysdeps/unix/sysv/linux/i386/clone.S: No such file or directory.
+gdb-peda$ print &thread_buf 
+$3 = (char (*)[128]) 0xf75f0ac4
+gdb-peda$ print 0xf75f0ac4 - 0xf75f0abc
+$4 = 0x8
+gdb-peda$ thread 1
+[Switching to thread 1 (Thread 0xf7df2780 (LWP 9811))]
+#0  clone () at ../sysdeps/unix/sysv/linux/i386/clone.S:108
+108	in ../sysdeps/unix/sysv/linux/i386/clone.S
+gdb-peda$ print &thread_buf 
+$5 = (char (*)[128]) 0xf7df2704
+gdb-peda$ print 0xf7df2704 - 0xf7df26fc
+$6 = 0x8
+

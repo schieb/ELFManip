@@ -43,6 +43,8 @@ import struct
 import os
 from shutil import copy
 
+from IPython import embed
+
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -490,13 +492,30 @@ class ELFManip(object):
                 if not isinstance(phdr, Custom_Segment):
                     continue
                 for section in phdr.sections:
-                    pad_to_modulus(f, PAGESIZE)
-                    pad_to_modulus(f, PAGESIZE, pad_if_aligned=True)
-                    section_offset = f.tell()
-                    f.write(section.contents)
                     
-                    section.sh_offset = section_offset
-            
+                    if section.mapped_by != phdr:
+                        # this section is already mapped by a *different* segment
+                        # therefore, we need to skip copying these bytes to the ELF
+                        
+                        #TODO: check that the segment mapping this section is a LOAD type
+                        #        but then this depends on the use case.
+                        #        maybe create a more general API?
+                        
+                        # only handle one section <--> segment mapping
+                        assert len(section.mapped_by.sections) == 1
+                        
+                        #assert section.mapped_by.sections[0].sh_offset is not None
+                        # this is always None. don't remember where it is adjusted before being written to the ELF
+                        # but it is being taken care of somewhere
+                        #section.sh_offset = section.mapped_by.sections[0].sh_offset
+                    
+                    else:
+                        pad_to_modulus(f, PAGESIZE)
+                        pad_to_modulus(f, PAGESIZE, pad_if_aligned=True)
+                        section_offset = f.tell()
+                        f.write(section.contents)
+                        
+                        section.sh_offset = section_offset
             """
             for section in self.custom_sections:
                 
@@ -751,6 +770,9 @@ class Custom_Section(Section):
         if self.sh_size is None:
             self.sh_size = len(self.contents)
         
+        self.mapped_by = None # the segment that this section belongs
+        #                       used when the same section is referenced by more than one segment
+        
         print "Created custom section:"
         print self
     
@@ -773,6 +795,7 @@ class Segment(object):
         self.p_align = p_align
     
     def __str__(self):
+        #TODO: need to check for None types for values that may go uninitialized (do the same for Section.__str__())
         return "Type: 0x%x, Offset: 0x%08x, Vaddr: 0x%08x, Paddr: 0x%08x, Filesize: 0x%08x, Memsize: 0x%08x, Flags: 0x%08x, Align: %d" % \
                 (self.p_type, self.p_offset, self.p_vaddr, self.p_paddr, 
                  self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
@@ -799,6 +822,7 @@ class Custom_Segment(Segment):
         '''
         assert isinstance(section, Custom_Section)
         self.sections.append(section)
+        section.mapped_by = self
     
     def _get_p_filesz(self):
         if len(self.sections) == 0:
