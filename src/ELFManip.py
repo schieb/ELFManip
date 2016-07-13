@@ -43,7 +43,7 @@ import struct
 import os
 from shutil import copy
 
-from IPython import embed
+#from IPython import embed
 
 import logging
 logger = logging.getLogger(__name__)
