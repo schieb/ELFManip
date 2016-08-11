@@ -1,5 +1,3 @@
-#! /usr/bin/env python
-
 '''
 TODO:
     Must-dos:
@@ -475,9 +473,11 @@ class ELFManip(object):
         if outfile == self.filename:
             logger.error("Must specify a different file destination than the original ELF")
             return
+        '''
         if len(self.custom_sections) == 0:
             logger.error("Not writing new ELF - you must specify at least one new section first") 
             return
+        '''
         
         logger.info("Writing new ELF: %s", outfile)
         # copy the entire file first
@@ -488,9 +488,11 @@ class ELFManip(object):
             
             #TODO: add sections according to the requested offset (if present)
             #        right now, any requested offset is being ignored
+            added_segment = False
             for phdr in self.phdrs['entries']:
                 if not isinstance(phdr, Custom_Segment):
                     continue
+                added_segment = True
                 for section in phdr.sections:
                     
                     if section.mapped_by != phdr:
@@ -541,27 +543,28 @@ class ELFManip(object):
                 self.set_section_offset(section, section_offset)
             """
             
-            # copy the section headers to the current file offset (end of the file)
-            pad_to_modulus(f, 0x10)
+            # If any custom *segments* were added, copy the original + custom *sections* to EOF
+            if added_segment:
+                pad_to_modulus(f, 0x10)
+                
+                new_sh_offset = f.tell()
+                self.ehdr['e_shoff'] = new_sh_offset
+                
+                logger.info("Appending %d section header entries (%d + %d)", len(self.shdrs['entries']) + len(self.custom_sections),
+                            len(self.shdrs['entries']), len(self.custom_sections))
+                f.write(self.dump_shdrs())
+                
+                
+                # Now do the same for the segments
+                logger.debug("Writing program headers to offset 0x%x", self.phdrs['base'])
+                self.ehdr['e_phoff'] = self.phdrs['base']
+                f.seek(self.phdrs['base'])
+                
+                phdr_bytes = self.dump_phdrs()
+                f.write(phdr_bytes)
             
-            new_sh_offset = f.tell()
-            self.ehdr['e_shoff'] = new_sh_offset
             
-            logger.info("Appending %d section header entries (%d + %d)", len(self.shdrs['entries']) + len(self.custom_sections),
-                        len(self.shdrs['entries']), len(self.custom_sections))
-            f.write(self.dump_shdrs())
-            
-            
-            # copy the program headers to the space that was determined in relocate_phdrs
-            logger.debug("Writing program headers to offset 0x%x", self.phdrs['base'])
-            self.ehdr['e_phoff'] = self.phdrs['base']
-            f.seek(self.phdrs['base'])
-            
-            phdr_bytes = self.dump_phdrs()
-            f.write(phdr_bytes)
-            
-            
-            # write the new elf header
+            # Copy the (possibly modified) ELF header even if no custom segments were added
             f.seek(0)
             f.write(self.dump_ehdr())
                 
@@ -570,7 +573,7 @@ class ELFManip(object):
             #TODO: more elegant solution for this and writing the final ELF in general
             for i, section in enumerate(self.shdrs['entries']):
                 for new_bytes, section_offset in section.buffered_writes:
-                    logger.debug("Patching in user-defined bytes for section %d", i)
+                    logger.debug("Patching in user-defined bytes for section %d (%s)", i, section.sh_name)
                     file_offset = section.sh_offset + section_offset
                     f.seek(file_offset)
                     f.write(new_bytes)
