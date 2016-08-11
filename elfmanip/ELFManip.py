@@ -473,11 +473,6 @@ class ELFManip(object):
         if outfile == self.filename:
             logger.error("Must specify a different file destination than the original ELF")
             return
-        '''
-        if len(self.custom_sections) == 0:
-            logger.error("Not writing new ELF - you must specify at least one new section first") 
-            return
-        '''
         
         logger.info("Writing new ELF: %s", outfile)
         # copy the entire file first
@@ -580,21 +575,6 @@ class ELFManip(object):
             
         self._sanity()
         logger.info("finished writing ELF")
-    
-    ''' don't think we will need this
-    def offset_to_vaddr(self, offset):
-        # find the last section with attribute ALLOC
-        last_alloc_section = None
-        for section in self.elf.iter_sections():
-            if "A" in describe_sh_flags(section['sh_flags']):
-                if last_alloc_section is None:
-                    last_alloc_section = section
-                elif section['sh_addr'] > last_alloc_section['sh_addr']:
-                    last_alloc_section = section
-        
-        next_available_spot = last_alloc_section['sh_addr'] + last_alloc_section['sh_size']
-        #TODO: finish this function
-    '''
     
     def addr_to_section(self, addr):
         ''' Returns the section that contains addr or None
