@@ -12,7 +12,7 @@ TODO:
 '''
  
  
-from Constants import (SHF_WRITE,
+from constants import (SHF_WRITE,
                        SHF_ALLOC,
                        SHF_EXECINSTR,
                        SHN_UNDEF,

@@ -6,8 +6,8 @@
 '''
 import sys
 sys.path.append("../../elfmanip")
-from Constants import *
-from ELFManip import ELFManip, Custom_Section, Custom_Segment
+from constants import *
+from elfmanip import ELFManip, Custom_Section, Custom_Segment
 from elftools.elf.elffile import ELFFile
 
 

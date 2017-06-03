@@ -4,8 +4,8 @@ import sys
 import subprocess
 sys.path.append("../elfmanip")
 
-from ELFManip import ELFManip, Custom_Section, Custom_Segment
-from Constants import PT_LOAD, PF_R
+from elfmanip import ELFManip, Custom_Section, Custom_Segment
+from constants import PT_LOAD, PF_R
 
 TEST_FILE = "test_section_patch"
 OUT_FILE = TEST_FILE + '.patched'

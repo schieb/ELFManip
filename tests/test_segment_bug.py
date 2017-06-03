@@ -8,8 +8,8 @@ newglobalbase = 0x7000000
 entry = 0x90025ad
 
 
-from ELFManip import ELFManip, Custom_Section, Custom_Segment
-from Constants import PT_LOAD
+from elfmanip import ELFManip, Custom_Section, Custom_Segment
+from constants import PT_LOAD
 
 def rewrite(fname, nname, newcode, newbase, newglobal, newglobalbase, entry):
     elf = ELFManip(fname, num_adtl_segments=2)
