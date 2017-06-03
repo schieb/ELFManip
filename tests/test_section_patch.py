@@ -2,9 +2,8 @@
 
 import sys
 import subprocess
-sys.path.append("../elfmanip")
 
-from elfmanip import ELFManip, Custom_Section, Custom_Segment
+from elfmanip import ELFManip, CustomSection, CustomSegment
 from constants import PT_LOAD, PF_R
 
 TEST_FILE = "test_section_patch"
@@ -14,20 +13,20 @@ WITH_THIS = "hello world!\x00"
 
 def main():
     elf = ELFManip(TEST_FILE, num_adtl_segments=0)
-    
+
     found = False
     for section in elf.shdrs['entries']:
         section_bytes = section.get_original_bytes()
         if REPLACE_THIS in section_bytes:
             found = True
             section.write(WITH_THIS, section_bytes.index(REPLACE_THIS))
-    
+
     assert found
-    
+
     elf.write_new_elf(OUT_FILE)
-    
+
     assert subprocess.check_output(["./" + OUT_FILE]) == WITH_THIS[:-1] + "\n"
-            
+
 
 if __name__ == "__main__":
     main()
