@@ -1,46 +1,32 @@
-'''
-TODO:
-    Must-dos:
-    - ability to *always* be able to relocate the program headers
-    - ability to specify a section's file offset field (currently ignored and overwritten when writing the ELF)
-        - would require intelligent book-keeping when adding and writing sections to the ELF file
-
-    Features:
-    - option to name the section when adding it
-
-
-'''
-
 import logging
 import os
+import shutil
 import struct
-
-from shutil import copy
 
 from elftools.elf.descriptions import describe_p_type
 from elftools.elf.elffile import ELFFile
 from elftools.elf.enums import ENUM_SH_TYPE, ENUM_P_TYPE, ENUM_E_TYPE, ENUM_E_MACHINE, ENUM_E_VERSION
 
-from elfmanip.constants import (SHF_WRITE,
-                                SHF_ALLOC,
-                                SHF_EXECINSTR,
-                                SHN_UNDEF,
-                                SHT_PROGBITS,
-                                SHT_NOBITS,
-                                SHT_NOTE,
-                                SHT_HASH,
-                                SHT_REL, SHT_RELA,
-                                SHT_SYMTAB,
-                                SHT_DYNAMIC,
-                                SHT_DYNSYM,
-                                SHT_GNU_verdef,
-                                SHT_GNU_verneed,
-                                SHT_GNU_versym,
-                                PF_X, PF_W, PF_R,
-                                PT_LOAD,
-                                PT_PHDR,
-                                PT_INTERP,
-                               )
+from constants import (SHF_WRITE,
+                       SHF_ALLOC,
+                       SHF_EXECINSTR,
+                       SHN_UNDEF,
+                       SHT_PROGBITS,
+                       SHT_NOBITS,
+                       SHT_NOTE,
+                       SHT_HASH,
+                       SHT_REL, SHT_RELA,
+                       SHT_SYMTAB,
+                       SHT_DYNAMIC,
+                       SHT_DYNSYM,
+                       SHT_GNU_verdef,
+                       SHT_GNU_verneed,
+                       SHT_GNU_versym,
+                       PF_X, PF_W, PF_R,
+                       PT_LOAD,
+                       PT_PHDR,
+                       PT_INTERP,
+                      )
 
 
 logger = logging.getLogger(__name__)
@@ -58,15 +44,19 @@ class BadELF(RuntimeError):
     pass
 
 class ELFManip(object):
-    def __init__(self, in_file, num_adtl_segments=1):
+    def __init__(self, in_file, num_adtl_segments=1, unsafe_try_hard=False):
         '''
-        @param in_file: the ELF executable
-        @param num_adtl_segments: the number of additional segments requested
+        @param in_file: Path to the ELF executable
+        @param num_adtl_segments: The number of additional segments required
+               TODO: explain a bit about this number
+        @param unsafe_try_hard: Causes ELFManip to only stop on fatal errors.
+                                Unsafe because the result may be broken
         '''
         self.filename = in_file
         self._file = open(self.filename, "rb")
         self.elf = ELFFile(self._file)
         self.num_adtl_segments = num_adtl_segments
+        self.unsafe_try_hard = unsafe_try_hard
 
         self.image_base = self._get_image_base()
         logger.info("Image base: 0x%08x", self.image_base)
@@ -80,8 +70,9 @@ class ELFManip(object):
         self.phdrs = self._init_phdrs()
         self.shdrs = self._init_shdrs()
 
-
     def _get_image_base(self):
+        ''' Find the lowest address of all the loadable segments.
+        '''
         base = None
         for segment in self.elf.iter_segments():
             if segment.header.p_type == "PT_LOAD":
@@ -92,6 +83,8 @@ class ELFManip(object):
         return base
 
     def _init_phdrs(self):
+        ''' Initialize copies of the program headers
+        '''
         phdrs = {'base': self.ehdr['e_phoff'],
                  'max_num': self.elf['e_phnum'],
                  'size': self.ehdr['e_phentsize'] * self.ehdr['e_phnum'],
@@ -100,7 +93,7 @@ class ELFManip(object):
         for s in self.elf.iter_segments():
             phdrs['entries'].append(Segment(ENUM_P_TYPE[s['p_type']], s['p_offset'], s['p_vaddr'], s['p_paddr'],
                                             s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align']))
-        logger.debug("Copying %d program headers from %s", len(phdrs['entries']), self.filename)
+        logger.debug("Copied %d program headers from %s", len(phdrs['entries']), self.filename)
         return phdrs
 
     def _init_shdrs(self):
@@ -116,7 +109,7 @@ class ELFManip(object):
                                             s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'],
                                             s['sh_info'], s['sh_addralign'], s['sh_entsize'],
                                             contents))
-        logger.debug("Copying %d section headers from %s", len(shdrs['entries']), self.filename)
+        logger.debug("Copied %d section headers from %s", len(shdrs['entries']), self.filename)
         return shdrs
 
     def _init_ehdr(self):
@@ -153,37 +146,55 @@ class ELFManip(object):
                                                   self.ehdr['e_shstrndx']
                                                  )
 
-    def relocate_phdrs(self, new_offset=None, new_size=None, segment=None):
-        ''' Attempts to find a new location for the program headers to reside in the ELF image
-            @param new_offset: offset to move the phdrs to. if -1, move to the end of the file
-            @warning: user should be very careful in specifying new_offset
-            @note: new_size should ideally be a multiple of e_phentsize (not enforced)
-            @return: location of the new phdrs (could be the original location)
+    def relocate_phdrs(self, custom_offset=None, new_size=None, segment=None, use_methods=None):
         '''
-        if new_offset is not None:
+        Attempts to find a new location for the program headers to reside in the ELF image.
+        In theory, you should be able to place the program headers anywhere in the image. The
+        loader has the requirement that it be placed in a PT_LOAD segment. However, in testing,
+        if the new address is 'too far' (one page?) away from the image base, it will fail an
+        assertion in the loader which will terminate the program.
+
+        If an explicit custom_offset is given, the new program headers will be placed there -
+        no questions asked. Otherwise, a series of methods will be executed in attempt to find a
+        suitable location.
+
+        @param custom_offset: The file offset to move the new phdrs
+        @note: new_size should ideally be a multiple of e_phentsize (not enforced)
+        @return: location of the new phdrs (could be the original location)
+        '''
+        if custom_offset is not None:
             if new_size is None:
                 logger.warn("You must specify the size of the relocated program headers")
                 return None
-            # take the user's offset as a command - don't ask questions, just do!
+
             logger.debug("Moving program headers to offset 0x%08x")
-            self._update_phdr_entry(new_offset, new_size, segment)
+            self._update_phdr_entry(custom_offset, new_size, segment)
+            return self.phdrs['base']
+
+        logger.info("Finding space to relocate the program headers...")
+        if use_methods is None:
+            use_methods = [self._phdr_hack1, self._phdr_hack2, self._phdr_hack3]
+        for method in use_methods:
+            if method():
+                return self.phdrs['base']
         else:
-            self._phdr_hack()
+            logger.warn("All methods failed")
+        return None
 
-        return self.phdrs['base']
-
-    def _phdr_hack(self):
-        ''' Check for free space in the ELF big enough to store the original program headers plus some extras
+    def _phdr_hack1(self):
         '''
-        logger.debug("Looking for sufficient padding between LOAD segments to relocate the PHDRs to")
+        Check if there is enough space in the gap between 'AX' and 'WA' segments.
+        These segments, if they exist, will necessarily be mapped to different pages.
+        If there is sufficient space after the 'AX' segment and before the 'WA' segment,
+        we can place the new program headers there.
+        '''
+        logger.debug("Trying method 1...")
+
         section_before_padding = None
         section_after_padding = None
 
-        ############
-        # Method 1 #
-        ############
-        # find the gap between 'AX' and 'WA' segments
         # TODO: generalize this to handle unordered section header entries (legal?)
+        # TODO: ^ can we just use the program headers???
         for section in self.elf.iter_sections():
             if section['sh_flags'] & SHF_WRITE:
                 section_after_padding = section
@@ -193,10 +204,10 @@ class ELFManip(object):
 
         if section_before_padding is None:
             logger.error("Cannot relocate the program headers.")
-            raise BadELF("ELF has no sections")
+            raise BadELF("ELF has no sections?")
         elif section_after_padding is None:
             logger.error("Cannot relocate the program headers.")
-            raise BadELF("ELF has no ELF file has no writable section")
+            raise BadELF("ELF has no writable section?")
 
         logger.debug("Sections on either side of the segment padding: [%s, %s]", section_before_padding.name, section_after_padding.name)
 
@@ -210,121 +221,132 @@ class ELFManip(object):
         if free_space_size >= minimum_required_space:
             logger.debug("Found enough space to move the program headers!")
 
-            # check that this space is actually empty
-            # TODO: use self._file or self.elf instead of reopening the file
-            empty = True
-            with open(self.filename) as f:
-                f.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
-                padding_bytes = f.read(free_space_size)
-                for b in padding_bytes:
+            # check that this space is actually empty (as it should be)
+            if not self.unsafe_try_hard:
+                empty = True
+                self._file.seek(section_before_padding['sh_offset'] + section_before_padding['sh_size'])
+                for b in self._file.read(free_space_size):
                     if b != "\x00":
                         empty = False
                 if not empty:
-                    # not sure why this would ever happen in a legitimate binary but issue a warning nonetheless
-                    logger.warn("Padding is not empty... repurposing anyways")
+                    # not sure why this would ever happen in a "normal" compiler-generated binary
+                    raise BadELF("Padding is not empty. Use unsafe_try_hard if you want to proceed.")
 
             self._update_phdr_entry(free_space_start, free_space_size)
-        elif self.num_adtl_segments == 1:
-            ############
-            # Method 2 #
-            ############
-            logger.warn("Not enough space to relocate the program headers. Repurposing the GNU_STACK entry")
-            logger.warn("Temporary hack to give you ability to add *one* section (which will be mapped by one segment).")
+            return True
+        logger.info("Method 1 failed - there is not enough space between segments to fit the new program headers")
+        return False
 
-            for idx, segment in enumerate(self.elf.iter_segments()):
-                if describe_p_type(segment['p_type']) == "GNU_STACK":
-                    # keep the old base and max number of entries
-                    self.phdrs['base'] = self.ehdr['e_phoff']
-                    self.phdrs['max_num'] = len(self.phdrs['entries'])
-                    # remove this entry, freeing up room for one user defined entry
-                    logger.debug("removing GNU_STACK pdhr entry")
-                    del self.phdrs['entries'][idx]
+    def _phdr_hack2(self):
+        '''
+        Try to repurpose the GNU_STACK entry. I.e., delete it, freeing room for one additional entry.
+        At one point I was convinced that in most cases, this entry is not needed. Could be wrong.
+        '''
+        logger.info("Trying method 2...")
+        if self.num_adtl_segments != 1:
+            logger.info("Method 2 does not apply: Would only provide one additional segment")
+            return False
 
-                    # assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
-                    logger.info("should have room to add one section/segment")
-                    break
+        for idx, segment in enumerate(self.elf.iter_segments()):
+            # TODO: why are we not calling self._update_phdr_entry like in Method 1??
+            if describe_p_type(segment['p_type']) == "GNU_STACK":
+                # keep the old base and max number of entries
+                self.phdrs['base'] = self.ehdr['e_phoff']
+                self.phdrs['max_num'] = len(self.phdrs['entries'])
+                # remove this entry, freeing up room for one user defined entry
+                logger.debug("removing GNU_STACK pdhr entry")
+                del self.phdrs['entries'][idx]
+
+                # assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
+                logger.info("should have room to add one section/segment")
+                return True
         else:
-            ############
-            # Method 3 #
-            ############
-            # move .interp section AND remove any following .note.* sections
-            # TODO: if no NOTE sections, ability to move .interp (if doing so would satisfy the requested num of segments) would be nice
-            # TODO: assert that the order of sections in the shdrs is correct
-            interp_index = 1  # hardcoded and expected location of the .interp section header entry
-            shstrtab_offset = self.shdrs['entries'][self.ehdr['e_shstrndx']].sh_offset
-            str_offset = self.shdrs['entries'][interp_index].sh_name
-            self._file.seek(shstrtab_offset + str_offset)
-            name = self._file.read(7)
-
-            if name != '.interp':
-                logger.warn("Method 3 failed: Unexpected sections.")
-                return
-
-            # find the last NOTE section in the group of NOTE sections immediately following .interp
-            last_note_section = None
-            for idx, section in enumerate(self.shdrs['entries']):
-                if idx in range(interp_index + 1):
-                    # skip to the section after .interp
-                    continue
-                if section.sh_type == SHT_NOTE:
-                    last_note_section = idx
-                else:
-                    break
-            if last_note_section is None:
-                logger.warn("Method 3 failed: There are no NOTE sections")
-                return
-
-            num_freed_sections = last_note_section - interp_index
-            freed_space = 0
-            for section in self.shdrs['entries'][interp_index + 1: last_note_section + 1]:
-                freed_space += section.sh_size
+            logger.info("Method 2 does not apply: No GNU_STACK entry")
+        return False
 
 
-            # not sure what this was for:
-            # num_freed_sections * self.elf.header['e_shentsize']
+    def _phdr_hack3(self):
+        '''
+        Try to remove and move some sections to make room for the new program headers.
+        The main idea is that the first few sections should be something like: [NULL, interp, NOTE1, NOTE2, ...].
+        The NOTE* sections are unneeded and can be removed. The NULL and interp sections are needed but can
+        be shifted over, overriting part of the old NOTE* section(s). This effectively frees up space just
+        after the old program headers, allowing for a few more (usually 2) entries to be added.
+        '''
+        logger.info("Trying method 3...")
+        # move .interp section AND remove any following .note.* sections
+        interp_index = 1  # hardcoded and expected location of the .interp section header entry
+        shstrtab_offset = self.shdrs['entries'][self.ehdr['e_shstrndx']].sh_offset
+        str_offset = self.shdrs['entries'][interp_index].sh_name
+        self._file.seek(shstrtab_offset + str_offset)
+        name = self._file.read(7)
 
-            num_new_phdr_entries = freed_space / self.ehdr['e_phentsize']
-            if num_new_phdr_entries >= self.num_adtl_segments:
-                logger.debug("Method 3 success!")
+        if name != '.interp':
+            logger.info("Method 3 failed: Unexpected section order.")
+            return False
+
+        # find the last NOTE section in the group of contiguous NOTE sections immediately following .interp
+        last_note_section = None
+        for idx, section in enumerate(self.shdrs['entries']):
+            if idx in range(interp_index + 1):
+                # skip to the section after .interp
+                continue
+            if section.sh_type == SHT_NOTE:
+                last_note_section = idx
             else:
-                logger.warn("Method 3 failed: Removing shdr entries did not yield enough space for %d additional phdrs", self.num_adtl_segments)
-                return
+                break
+        if last_note_section is None:
+            logger.info("Method 3 failed: There are no NOTE sections to remove")
+            # TODO: if no NOTE sections, ability to move .interp (if doing so would satisfy the requested num of segments) would be nice
+            #       also, if you need just a few more bytes you can write a new hack that renames the interpreter to a short name
+            #       like /l and symlink it to the old value
+            return False
+
+        num_freed_sections = last_note_section - interp_index
+        freed_space = 0
+        for section in self.shdrs['entries'][interp_index + 1: last_note_section + 1]:
+            freed_space += section.sh_size
+
+        num_new_phdr_entries = freed_space / self.ehdr['e_phentsize']
+        if num_new_phdr_entries < self.num_adtl_segments:
+            logger.warn("Method 3 failed: Not enough space for %d additional phdrs", self.num_adtl_segments)
+            return False
+
+        logger.info("Method 3 success!")
+        logger.debug("removing shdr entries for %d NOTE sections", num_freed_sections)
+        logger.debug("resulted in room for %d additional program headers", num_new_phdr_entries)
+
+        # move shdrs 0 and 1 (NULL, .interp) to overwrite shdrs last_note_section-1 and last_note_section, respectively
+        self.shdrs['entries'][last_note_section - 1] = self.shdrs['entries'][0]
+        self.shdrs['entries'][last_note_section] = self.shdrs['entries'][1]
+
+        # remove old NULL and interp shdr entries in reverse order
+        for i in xrange(num_freed_sections - 1, -1, -1):
+            self.remove_shdr_entry(i)
 
 
-            logger.info("removing shdr entries for %d NOTE sections", num_freed_sections)
-            logger.info("resulted in room for %d additional program headers", num_new_phdr_entries)
+        # .interp shdr was moved so now we need to update some of its fields then copy its old contents to the new location
+        interp_contents = self.shdrs['entries'][interp_index].get_original_bytes()
+        self.shdrs['entries'][interp_index].sh_addr += freed_space
+        self.shdrs['entries'][interp_index].sh_offset += freed_space
+        self.shdrs['entries'][interp_index].write(interp_contents)
 
-            # move shdrs 0 and 1 (NULL, .interp) to overwrite shdrs last_note_section-1 and last_note_section, respectively
-            self.shdrs['entries'][last_note_section - 1] = self.shdrs['entries'][0]
-            self.shdrs['entries'][last_note_section] = self.shdrs['entries'][1]
+        # also, update the INTERP segment
+        for segment in self.phdrs['entries']:
+            if segment.p_type == PT_INTERP:
+                segment.p_vaddr += freed_space
+                segment.p_paddr += freed_space
+                segment.p_offset += freed_space
+                break
 
-            # remove old NULL and interp shdr entries in reverse order
-            for i in xrange(num_freed_sections - 1, -1, -1):
-                self.remove_shdr_entry(i)
+        # free up the added space by updating the elf header
+        self.ehdr['e_shoff'] += num_freed_sections * self.ehdr['e_shentsize']
 
-
-            # .interp shdr was moved so now we need to update some of its fields then copy its old contents to the new location
-            interp_contents = self.shdrs['entries'][interp_index].get_original_bytes()
-            self.shdrs['entries'][interp_index].sh_addr += freed_space
-            self.shdrs['entries'][interp_index].sh_offset += freed_space
-            self.shdrs['entries'][interp_index].write(interp_contents)
-
-            # also, update the INTERP segment
-            for segment in self.phdrs['entries']:
-                if segment.p_type == PT_INTERP:
-                    segment.p_vaddr += freed_space
-                    segment.p_paddr += freed_space
-                    segment.p_offset += freed_space
-
-            # free up the added space by updating the elf header
-            self.ehdr['e_shoff'] += num_freed_sections * self.ehdr['e_shentsize']
-
-
-            self._update_phdr_entry(self.phdrs['base'], self.phdrs['size'] + freed_space)
-
+        self._update_phdr_entry(self.phdrs['base'], self.phdrs['size'] + freed_space)
+        return True
 
     def _update_phdr_entry(self, new_base, max_size, segment=None):
-        ''' Update the PHDR entry in (executable ELF files) to match the new location of the program headers
+        ''' Update the PHDR entry to match the new location of the program headers
             @param new_base: offset at which the program headers will be located
             @param max_size: maximum size in bytes that the new program headers can grow to
             TODO: segment parameter is a quick hack and might need to be refactored
@@ -371,7 +393,6 @@ class ELFManip(object):
                 logger.error("problem finding LOAD segment containing new phdr location")
                 raise BadELF("can't find LOAD segment")
 
-
     def add_section(self, section, segment=None):
         assert isinstance(section, CustomSection)
         if segment is not None:
@@ -382,19 +403,16 @@ class ELFManip(object):
         self.custom_sections.append(section)
 
     def remove_shdr_entry(self, sh_num):
-        ''' remove a section header entry (does not remove/zero out the section's contents)
-            the current purpose of this funciton is to repurpose the space consumed by unneeded sections
-            to do this we must remove the associated section header entry and do some additional bookkeeping
+        ''' Remove a section header entry (does not remove/zero out the section's contents).
+            The current purpose of this funciton is to repurpose the space consumed by unneeded sections.
+            To do this we must remove the associated section header entry and do some additional bookkeeping.
             @param sh_num: section header number to remove from the section headers
             @note: shdr entries are stored in a list so removing one entry will change subsequent indicies
                     to remove many entires, it is recommended to remove them inreverse order so the indicies
                     or subsequently removed entries do not change after each removal
-            @note: currently unspecified what happens when a section header is removed that is associated with
-                    another section via that section's sh_link or sh_info field
             @note: the section types handled are most likely incomplete
         '''
-        # remove the section header entry
-        logger.debug("removing section header entry %d", sh_num)
+        logger.debug("Removing section header entry %d", sh_num)
         if len(self.shdrs['entries']) < sh_num:
             logger.warn("Cannot remove section %d: Invalid section number", sh_num)
             return None
@@ -436,7 +454,13 @@ class ELFManip(object):
         return removed_section
 
     def add_segment(self, segment):
-        assert isinstance(segment, CustomSegment)
+        ''' Registers a segment to be added to the new ELF when it is written
+        @param segment: The CustomSegment instance to add
+        @return: Number of segment slots that are still available or None if could not add segment
+        '''
+        if not isinstance(segment, CustomSegment):
+            raise TypeError("Passed non-CustomSegment to add_segment")
+
         # check for room in program headers for a new entry
         if len(self.phdrs['entries']) < self.phdrs['max_num']:
             self.phdrs['entries'].append(segment)
@@ -463,12 +487,6 @@ class ELFManip(object):
                 phdr.finalize()
         return ''.join(p.dump_entry() for p in self.phdrs['entries'])
 
-    '''
-    def set_section_offset(self, section, offset):
-        section.sh_offset = offset
-        section.segment.p_offset = offset
-    '''
-
     def write_new_elf(self, outfile):
         if outfile == self.filename:
             logger.error("Must specify a different file destination than the original ELF")
@@ -476,7 +494,7 @@ class ELFManip(object):
 
         logger.info("Writing new ELF: %s", outfile)
         # copy the entire file first
-        copy(self.filename, outfile)
+        shutil.copy(self.filename, outfile)
         with open(outfile, "r+b") as f:
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
@@ -513,30 +531,6 @@ class ELFManip(object):
                         f.write(section.contents)
 
                         section.sh_offset = section_offset
-            """
-            for section in self.custom_sections:
-
-                # NOTE: the addition of padding was not tested very much
-                #        it could be the case that we can get away with padding less
-                #        basically I am attempting to play it safe
-
-                # pad to section alignment
-                pad_to_modulus(f, PAGESIZE)
-
-                # add extra page worth of padding
-                pad_to_modulus(f, PAGESIZE, pad_if_aligned=True)
-
-                section_offset = f.tell()
-
-                logger.debug("section offset for '%s': 0x%08x", section.filename, section_offset)
-
-                # append the secton contents
-                write_from_file(f, section.filename)
-                section_end = f.tell()
-
-
-                self.set_section_offset(section, section_offset)
-            """
 
             # If any custom *segments* were added, copy the original + custom *sections* to EOF
             if added_segment:
@@ -579,9 +573,6 @@ class ELFManip(object):
     def addr_to_section(self, addr):
         ''' Returns the section that contains addr or None
         '''
-        # NOTE: section bounds check does not include padding if present
-        # NOTE: bss sections will return None
-        # TODO: check custom sections once offset placement is enforced
         for section in self.shdrs['entries']:
             if section.sh_type == SHT_NOBITS:
                 continue
@@ -592,9 +583,6 @@ class ELFManip(object):
     def offset_to_section(self, offset):
         ''' Returns the section that contains offset or None
         '''
-        # NOTE: section bounds check does not include padding if present
-        # NOTE: bss sections will return None
-        # TODO: check custom sections once offset placement is enforced
         for section in self.shdrs['entries']:
             if section['sh_type'] == SHT_NOBITS:
                 continue
@@ -615,45 +603,11 @@ class ELFManip(object):
     def set_interp(self, new_interp):
         ''' new_interp should be null-terminated
         '''
-        interp_section = None
         for segment in self.phdrs['entries']:
             if segment.p_type == PT_INTERP:
                 interp_section = self.addr_to_section(segment.p_vaddr)
-                break
-        if interp_section is not None:
-            return self.write_to_section(interp_section, new_interp, 0)
-
+                return self.write_to_section(interp_section, new_interp)
         return None
-
-    def _sanity(self):
-        ''' Help catch illusive bugs
-        '''
-        if len(self.ehdr) != 14:
-            logger.error("ELF header has unexpected number of members - potential bug")
-        if len(self.phdrs) != 4:
-            logger.error("Program headers have unexpected number of members - potential bug")
-        if len(self.shdrs) != 2:
-            logger.error("Section headers have unexpected number of members - potential bug")
-
-    ''' deprecated -- keep changes in a local copy of the original ELF header
-                      and write that out when finished ELF manipulations
-    def patch_elf_header(self, f, new_sh_offset, new_ph_offset):
-        #TODO: abstract this function
-        if self.new_entry_point is not None:
-            f.seek(EP_OFFSET)
-            f.write(struct.pack("<i", self.new_entry_point))
-
-        f.seek(SH_OFFSET)
-        f.write(struct.pack("<i", new_sh_offset))
-        f.seek(NUM_SH_OFFSET)
-        f.write(struct.pack("<h", len(self.shdrs['entries']) + len(self.custom_sections)))
-
-        if new_ph_offset is not None:
-            f.seek(PH_OFFSET)
-            f.write(struct.pack("<i", new_ph_offset))
-            f.seek(NUM_PH_OFFSET)
-            f.write(struct.pack("<h", len(self.phdrs['entries'])))
-    '''
 
 class Section(object):
     ''' The basic section class.
@@ -679,12 +633,6 @@ class Section(object):
         self.contents = contents
         self.buffered_writes = []
 
-
-    def get_next_offset(self):
-        ''' Determines the file offset at which this section will be placed in the ELF
-        '''
-        pass
-
     def write(self, new_bytes, offset=0):
         ''' Write new_bytes to section offset
         @note: written only when the ELF is written to disk
@@ -693,8 +641,8 @@ class Section(object):
         if self.sh_type != SHT_NOBITS:
             if len(new_bytes) <= self.sh_size - offset:
                 self.buffered_writes.append((new_bytes, offset))
-                return self
-        return None
+                return True
+        return False
 
     def get_original_bytes(self, offset=None, size=None):
         ''' Returns the original, unmodified size number of bytes at offset
@@ -730,15 +678,12 @@ class Section(object):
 
 
 class CustomSection(Section):
-    '''
-        TODO: sections cannot be given a specific file offset, instead it is determined when the ELF file is written
-                user might want control over this
-    '''
-    def __init__(self, contents='', sh_type=SHT_PROGBITS, sh_flags=SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR, sh_addr=None, sh_addralign=0x10):
+    def __init__(self, contents='', name=0x1f, sh_type=SHT_PROGBITS, sh_flags=SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR, sh_addr=None, sh_addralign=0x10):
         '''
-        @param contents: file containing section contents
+        @param contents: contents of the section as a string
+        @param name: offset into the section header string table; custom name is not implemented
         '''
-        super(self.__class__, self).__init__(0x1f,  # randomish name from the section header string table
+        super(self.__class__, self).__init__(name,
                                              sh_type,
                                              sh_flags,
                                              sh_addr,
@@ -754,10 +699,7 @@ class CustomSection(Section):
             self.sh_size = len(self.contents)
 
         self.mapped_by = None  # the segment that this section belongs
-        #                       used when the same section is referenced by more than one segment
-
-        print "Created custom section:"
-        print self
+                               # used when the same section is referenced by more than one segment
 
     def is_defined(self):
         for attr in [self.sh_name, self.sh_type, self.sh_flags, self.sh_addr, self.sh_offset, self.sh_size,
@@ -778,7 +720,6 @@ class Segment(object):
         self.p_align = p_align
 
     def __str__(self):
-        # TODO: need to check for None types for values that may go uninitialized (do the same for Section.__str__())
         return "Type: 0x%x, Offset: 0x%08x, Vaddr: 0x%08x, Paddr: 0x%08x, Filesize: 0x%08x, Memsize: 0x%08x, Flags: 0x%08x, Align: %d" % \
                 (self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
                  self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
@@ -792,18 +733,17 @@ class CustomSegment(Segment):
     def __init__(self, p_type, p_offset=None, p_vaddr=None, p_paddr=None, p_filesz=None, p_memsz=None, p_flags=None, p_align=0x1000):
         '''
         Just like a Segment except we need to do special things to make sure that the segments are mapped correctly
-
         '''
-
         super(self.__class__, self).__init__(p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align)
 
         self.sections = []
 
-
     def register_section(self, section):
-        ''' associate section with this segment
         '''
-        assert isinstance(section, CustomSection)
+        Associate section with this segment
+        '''
+        if not isinstance(section, CustomSection):
+            raise TypeError("section must be a CustomSection instance")
         self.sections.append(section)
         section.mapped_by = self
 
@@ -841,11 +781,14 @@ class CustomSegment(Segment):
         return flags
 
     def finalize(self):
-        ''' call after all sections have been added to this segment and those sections properties are also finalized
-            this will attempt to fill in all the correct phdr values with respect to the sections that have been registered
+        '''
+        Call after all sections have been added to this segment and those section's properties have been finalized.
+        This will attempt to fill in all the correct phdr values with respect to the sections that have been registered.
         '''
         for section in self.sections:
-            assert section.is_defined()
+            if not section.is_defined():
+                logger.error("Section is not fully initialized!")
+                return
         # only makes sense if this segment has sections
         if len(self.sections) > 0:
             self.p_offset = min((section.sh_offset for section in self.sections))
@@ -873,22 +816,3 @@ def pad_to_modulus(f, modulus, padding_bytes='\x00', pad_if_aligned=False):
     padding_len = modulus - (current % modulus)
     logger.debug("padding EOF with %d null bytes", padding_len)
     f.write(padding_bytes * (padding_len / len(padding_bytes)) + padding_bytes[:padding_len % len(padding_bytes)])
-
-def write_from_file(out_file, in_file):
-    ''' Writes in_file to the current file offset of out_file
-
-        @param out_file: output file
-        @param in_file: input file
-    '''
-    with open(in_file, "rb") as in_f:
-        for chunk in iter_chunks(in_f):
-            if chunk is None:
-                break
-            out_file.write(chunk)
-
-def iter_chunks(file_object, block_size=1024):
-    while True:
-        data = file_object.read(block_size)
-        if not data:
-            yield None
-        yield data
