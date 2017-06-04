@@ -1,4 +1,4 @@
-// gcc -m32 -o test_section_patch test_section_patch.c
+// gcc -m32 -o patch_me patch_me.c
 #include <stdio.h>
 
 int main(void){
