@@ -1,2 +1,2 @@
-from elfmanip import *
+from .elfmanip import *
 from . import constants
