@@ -1,4 +1,8 @@
-build/*
-test-tls
-test-tls.new
 *.pyc
+/build
+/dist
+*.egg-info
+.gdb_history
+peda-session*
+.project
+.pydevproject
