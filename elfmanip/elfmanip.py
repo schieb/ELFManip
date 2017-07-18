@@ -58,6 +58,10 @@ class ELFManip(object):
         self.num_adtl_segments = num_adtl_segments
         self.unsafe_try_hard = unsafe_try_hard
 
+        # Save architecture in order to change platform-dependent entries in headers 
+        self.arch = self.elf.get_machine_arch()
+        logger.info("Architecture: %s", self.arch)
+
         self.image_base = self._get_image_base()
         logger.info("Image base: 0x%08x", self.image_base)
 
@@ -92,7 +96,7 @@ class ELFManip(object):
         # copy all the original program headers from the ELF file
         for s in self.elf.iter_segments():
             phdrs['entries'].append(Segment(ENUM_P_TYPE[s['p_type']], s['p_offset'], s['p_vaddr'], s['p_paddr'],
-                                            s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align']))
+                                            s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align'], self.arch))
         logger.debug("Copied %d program headers from %s", len(phdrs['entries']), self.filename)
         return phdrs
 
@@ -108,7 +112,7 @@ class ELFManip(object):
             shdrs['entries'].append(Section(s['sh_name'], ENUM_SH_TYPE[s['sh_type']], s['sh_flags'],
                                             s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'],
                                             s['sh_info'], s['sh_addralign'], s['sh_entsize'],
-                                            contents))
+                                            contents, self.arch))
         logger.debug("Copied %d section headers from %s", len(shdrs['entries']), self.filename)
         return shdrs
 
@@ -130,7 +134,9 @@ class ELFManip(object):
                }
 
     def dump_ehdr(self):
-        return self.ehdr['e_ident'] + struct.pack("<HHIIIIIHHHHHH",
+        # Set size for platform-dependent entries.  Default value is a 32-bit int.
+        size = 'Q' if self.arch == 'x64' else 'I'
+        return self.ehdr['e_ident'] + struct.pack("<HHI%s%s%sIHHHHHH" % (size,size,size),
                                                   self.ehdr['e_type'],
                                                   self.ehdr['e_machine'],
                                                   self.ehdr['e_version'],
@@ -366,7 +372,10 @@ class ELFManip(object):
                 p.p_offset = self.phdrs['base']
                 p.p_vaddr = self.image_base + p.p_offset
                 p.p_paddr = self.image_base + p.p_offset
-                p.p_filesz = len(self.phdrs['entries']) * 32  # 32 bytes each
+                if self.arch == 'x64':
+                    p.p_filesz = len(self.phdrs['entries']) * 56  # 56 bytes each for 64-bit
+                else:
+                    p.p_filesz = len(self.phdrs['entries']) * 32  # 32 bytes each for 32-bit
                 p.p_memsz = p.p_filesz
 
         if segment is not None:
@@ -395,6 +404,7 @@ class ELFManip(object):
 
     def add_section(self, section, segment=None):
         assert isinstance(section, CustomSection)
+        section.arch = self.arch # Override initial value so that custom section's arch matches the binary
         if segment is not None:
             assert isinstance(segment, CustomSegment)
             segment.register_section(section)
@@ -460,6 +470,7 @@ class ELFManip(object):
         '''
         if not isinstance(segment, CustomSegment):
             raise TypeError("Passed non-CustomSegment to add_segment")
+        segment.arch = self.arch # Override initial value so that custom segment's arch matches the binary
 
         # check for room in program headers for a new entry
         if len(self.phdrs['entries']) < self.phdrs['max_num']:
@@ -567,7 +578,6 @@ class ELFManip(object):
                     f.seek(file_offset)
                     f.write(new_bytes)
 
-        self._sanity()
         logger.info("finished writing ELF")
 
     def addr_to_section(self, addr):
@@ -615,7 +625,7 @@ class Section(object):
 
         User-defined sections must be instanciated via the CustomSection class
     '''
-    def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize, contents):
+    def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize, contents, arch):
 
         self.sh_name = sh_name
         self.sh_type = sh_type
@@ -632,6 +642,8 @@ class Section(object):
 
         self.contents = contents
         self.buffered_writes = []
+
+        self.arch = arch
 
     def write(self, new_bytes, offset=0):
         ''' Write new_bytes to section offset
@@ -665,7 +677,9 @@ class Section(object):
         return current_contents
 
     def dump_entry(self):
-        return struct.pack("<10i",
+        # Set size for platform-dependent entries.  Default value is a 32-bit int.
+        size = 'Q' if self.arch == 'x64' else 'I'
+        return struct.pack("<2I4%s2I2%s" % (size,size),
                            self.sh_name, self.sh_type, self.sh_flags, self.sh_addr,
                            self.sh_offset, self.sh_size, self.sh_link, self.sh_info,
                            self.sh_addralign, self.sh_entsize)
@@ -678,7 +692,7 @@ class Section(object):
 
 
 class CustomSection(Section):
-    def __init__(self, contents='', name=0x1f, sh_type=SHT_PROGBITS, sh_flags=SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR, sh_addr=None, sh_addralign=0x10):
+    def __init__(self, contents='', name=0x1f, sh_type=SHT_PROGBITS, sh_flags=SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR, sh_addr=None, sh_addralign=0x10, arch='x86'):
         '''
         @param contents: contents of the section as a string
         @param name: offset into the section header string table; custom name is not implemented
@@ -694,6 +708,7 @@ class CustomSection(Section):
                                              sh_addralign,
                                              0,
                                              contents,
+                                             arch
                                             )
         if self.sh_size is None:
             self.sh_size = len(self.contents)
@@ -709,7 +724,7 @@ class CustomSection(Section):
         return True
 
 class Segment(object):
-    def __init__(self, p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align):
+    def __init__(self, p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align, arch):
         self.p_type = p_type
         self.p_offset = p_offset
         self.p_vaddr = p_vaddr
@@ -718,6 +733,7 @@ class Segment(object):
         self.p_memsz = p_memsz
         self.p_flags = p_flags
         self.p_align = p_align
+        self.arch = arch
 
     def __str__(self):
         return "Type: 0x%x, Offset: 0x%08x, Vaddr: 0x%08x, Paddr: 0x%08x, Filesize: 0x%08x, Memsize: 0x%08x, Flags: 0x%08x, Align: %d" % \
@@ -725,16 +741,23 @@ class Segment(object):
                  self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
 
     def dump_entry(self):
-        return struct.pack("<8i",
+        # 64-bit binaries change the location of p_flags, so segments differ more significantly between
+        # x64 and x86 binaries than sections.
+        if self.arch == 'x64':
+            return struct.pack("<2I6Q",
+                           self.p_type, self.p_flags, self.p_offset, self.p_vaddr, self.p_paddr,
+                           self.p_filesz, self.p_memsz, self.p_align)
+        else:
+            return struct.pack("<8I",
                            self.p_type, self.p_offset, self.p_vaddr, self.p_paddr,
                            self.p_filesz, self.p_memsz, self.p_flags, self.p_align)
 
 class CustomSegment(Segment):
-    def __init__(self, p_type, p_offset=None, p_vaddr=None, p_paddr=None, p_filesz=None, p_memsz=None, p_flags=None, p_align=0x1000):
+    def __init__(self, p_type, p_offset=None, p_vaddr=None, p_paddr=None, p_filesz=None, p_memsz=None, p_flags=None, p_align=0x1000, arch='x86'):
         '''
         Just like a Segment except we need to do special things to make sure that the segments are mapped correctly
         '''
-        super(self.__class__, self).__init__(p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align)
+        super(self.__class__, self).__init__(p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align, arch)
 
         self.sections = []
 
