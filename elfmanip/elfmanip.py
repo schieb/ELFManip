@@ -567,7 +567,6 @@ class ELFManip(object):
                     f.seek(file_offset)
                     f.write(new_bytes)
 
-        self._sanity()
         logger.info("finished writing ELF")
 
     def addr_to_section(self, addr):
