@@ -173,7 +173,7 @@ class ELFManip(object):
                 logger.warn("You must specify the size of the relocated program headers")
                 return None
 
-            logger.debug("Moving program headers to offset 0x%08x")
+            logger.debug("Moving program headers to offset 0x%08x" % custom_offset)
             self._update_phdr_entry(custom_offset, new_size, segment)
             return self.phdrs['base']
 
@@ -262,6 +262,7 @@ class ELFManip(object):
                 # remove this entry, freeing up room for one user defined entry
                 logger.debug("removing GNU_STACK pdhr entry")
                 del self.phdrs['entries'][idx]
+                self.ehdr['e_phnum'] -= 1
 
                 # assert describe_p_type(gnu_stack_entry.p_type) == "GNU_STACK"
                 logger.info("should have room to add one section/segment")
@@ -399,8 +400,8 @@ class ELFManip(object):
                     break
 
             if not found:
-                logger.error("problem finding LOAD segment containing new phdr location")
-                raise BadELF("can't find LOAD segment")
+                logger.warning("problem finding LOAD segment containing new phdr location")
+                #raise BadELF("can't find LOAD segment")
 
     def add_section(self, section, segment=None):
         assert isinstance(section, CustomSection)
@@ -810,7 +811,7 @@ class CustomSegment(Segment):
         '''
         for section in self.sections:
             if not section.is_defined():
-                logger.error("Section is not fully initialized!")
+                logger.error("Section to be loaded at 0x%x is not fully initialized!" % section.sh_addr)
                 return
         # only makes sense if this segment has sections
         if len(self.sections) > 0:
