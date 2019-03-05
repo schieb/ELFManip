@@ -5,7 +5,7 @@ import struct
 
 from elftools.elf.descriptions import describe_p_type
 from elftools.elf.elffile import ELFFile
-from elftools.elf.enums import ENUM_SH_TYPE, ENUM_P_TYPE, ENUM_E_TYPE, ENUM_E_MACHINE, ENUM_E_VERSION
+from elftools.elf.enums import ENUM_SH_TYPE_BASE, ENUM_P_TYPE_BASE, ENUM_E_TYPE, ENUM_E_MACHINE, ENUM_E_VERSION
 
 from constants import (SHF_WRITE,
                        SHF_ALLOC,
@@ -95,7 +95,7 @@ class ELFManip(object):
                  'entries': []}
         # copy all the original program headers from the ELF file
         for s in self.elf.iter_segments():
-            phdrs['entries'].append(Segment(ENUM_P_TYPE[s['p_type']], s['p_offset'], s['p_vaddr'], s['p_paddr'],
+            phdrs['entries'].append(Segment(ENUM_P_TYPE_BASE[s['p_type']], s['p_offset'], s['p_vaddr'], s['p_paddr'],
                                             s['p_filesz'], s['p_memsz'], s['p_flags'], s['p_align'], self.arch))
         logger.debug("Copied %d program headers from %s", len(phdrs['entries']), self.filename)
         return phdrs
@@ -109,7 +109,7 @@ class ELFManip(object):
             else:
                 self.elf.stream.seek(s['sh_offset'])
                 contents = self.elf.stream.read(s['sh_size'])
-            shdrs['entries'].append(Section(s['sh_name'], ENUM_SH_TYPE[s['sh_type']], s['sh_flags'],
+            shdrs['entries'].append(Section(s['sh_name'], ENUM_SH_TYPE_BASE[s['sh_type']], s['sh_flags'],
                                             s['sh_addr'], s['sh_offset'], s['sh_size'], s['sh_link'],
                                             s['sh_info'], s['sh_addralign'], s['sh_entsize'],
                                             contents, self.arch))
