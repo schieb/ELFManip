@@ -1,4 +1,4 @@
-#!/bin/env python2
+#!/usr/bin/env python2
 '''
 Shows uses of CustomSection and CustomSegment
 '''

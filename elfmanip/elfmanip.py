@@ -502,7 +502,7 @@ class ELFManip(object):
         logger.info("Writing new ELF: %s", outfile)
         # copy the entire file first
         shutil.copy(self.filename, outfile)
-        with open(outfile, "rb") as f:
+        with open(outfile, "wb") as f:
             # append all the section contents, patching in the sh_addr and sh_offset fields as they are concretized
             f.seek(0, os.SEEK_END)
 
