@@ -1,3 +1,5 @@
+#!/bin/env python2
+
 # This example shows very basic functionality of replacing one sequence of bytes with another
 
 from elfmanip import ELFManip
